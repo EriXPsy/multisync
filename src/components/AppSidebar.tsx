@@ -7,6 +7,9 @@ import {
   BookOpen,
   Settings2,
   Activity,
+  Upload,
+  Video,
+  GitBranch,
 } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useLocation } from "react-router-dom";
@@ -26,6 +29,9 @@ import {
 
 const mainItems = [
   { title: "Unified Timeline", url: "/", icon: BarChart3 },
+  { title: "Import Data", url: "/import", icon: Upload },
+  { title: "Video Annotator", url: "/annotate", icon: Video },
+  { title: "Analysis Pipeline", url: "/pipeline", icon: GitBranch },
   { title: "Configuration", url: "/config", icon: Settings2 },
   { title: "References", url: "/references", icon: BookOpen },
 ];

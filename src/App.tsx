@@ -9,6 +9,9 @@ import Index from "./pages/Index";
 import ConfigPage from "./pages/ConfigPage";
 import ReferencesPage from "./pages/ReferencesPage";
 import ModalityPage from "./pages/ModalityPage";
+import ImportPage from "./pages/ImportPage";
+import AnnotatePage from "./pages/AnnotatePage";
+import PipelinePage from "./pages/PipelinePage";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -32,6 +35,9 @@ const App = () => (
               <main className="flex-1 overflow-auto">
                 <Routes>
                   <Route path="/" element={<Index />} />
+                  <Route path="/import" element={<ImportPage />} />
+                  <Route path="/annotate" element={<AnnotatePage />} />
+                  <Route path="/pipeline" element={<PipelinePage />} />
                   <Route path="/config" element={<ConfigPage />} />
                   <Route path="/references" element={<ReferencesPage />} />
                   <Route path="/modality/:modality" element={<ModalityPage />} />

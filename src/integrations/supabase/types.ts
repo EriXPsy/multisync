@@ -14,7 +14,174 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      analysis_runs: {
+        Row: {
+          alignment_report: Json | null
+          config: Json
+          created_at: string
+          dataset_id: string
+          id: string
+          name: string
+          results: Json | null
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          alignment_report?: Json | null
+          config?: Json
+          created_at?: string
+          dataset_id: string
+          id?: string
+          name?: string
+          results?: Json | null
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          alignment_report?: Json | null
+          config?: Json
+          created_at?: string
+          dataset_id?: string
+          id?: string
+          name?: string
+          results?: Json | null
+          status?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "analysis_runs_dataset_id_fkey"
+            columns: ["dataset_id"]
+            isOneToOne: false
+            referencedRelation: "datasets"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      data_streams: {
+        Row: {
+          column_mapping: Json | null
+          created_at: string
+          data: Json | null
+          dataset_id: string
+          id: string
+          index_name: string
+          metadata: Json | null
+          modality: string
+          sample_rate_hz: number | null
+          unit: string | null
+        }
+        Insert: {
+          column_mapping?: Json | null
+          created_at?: string
+          data?: Json | null
+          dataset_id: string
+          id?: string
+          index_name: string
+          metadata?: Json | null
+          modality: string
+          sample_rate_hz?: number | null
+          unit?: string | null
+        }
+        Update: {
+          column_mapping?: Json | null
+          created_at?: string
+          data?: Json | null
+          dataset_id?: string
+          id?: string
+          index_name?: string
+          metadata?: Json | null
+          modality?: string
+          sample_rate_hz?: number | null
+          unit?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "data_streams_dataset_id_fkey"
+            columns: ["dataset_id"]
+            isOneToOne: false
+            referencedRelation: "datasets"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      datasets: {
+        Row: {
+          created_at: string
+          description: string | null
+          id: string
+          modalities: string[] | null
+          name: string
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          description?: string | null
+          id?: string
+          modalities?: string[] | null
+          name: string
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          description?: string | null
+          id?: string
+          modalities?: string[] | null
+          name?: string
+          status?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      video_annotations: {
+        Row: {
+          confidence: number | null
+          created_at: string
+          dataset_id: string
+          end_timestamp_ms: number | null
+          event_type: string
+          id: string
+          label: string
+          modality: string
+          notes: string | null
+          timestamp_ms: number
+        }
+        Insert: {
+          confidence?: number | null
+          created_at?: string
+          dataset_id: string
+          end_timestamp_ms?: number | null
+          event_type: string
+          id?: string
+          label: string
+          modality?: string
+          notes?: string | null
+          timestamp_ms: number
+        }
+        Update: {
+          confidence?: number | null
+          created_at?: string
+          dataset_id?: string
+          end_timestamp_ms?: number | null
+          event_type?: string
+          id?: string
+          label?: string
+          modality?: string
+          notes?: string | null
+          timestamp_ms?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "video_annotations_dataset_id_fkey"
+            columns: ["dataset_id"]
+            isOneToOne: false
+            referencedRelation: "datasets"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Views: {
       [_ in never]: never

@@ -12,33 +12,42 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { supabase } from "@/integrations/supabase/client";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Upload, FileSpreadsheet, Plus, Trash2, Check, AlertCircle, Database } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  Upload,
+  FileSpreadsheet,
+  Plus,
+  Trash2,
+  Check,
+  AlertCircle,
+  Database,
+  Sparkles,
+  Info,
+  RefreshCw,
+} from "lucide-react";
 import { toast } from "sonner";
 import { SYNCHRONY_INDICES } from "@/lib/synchrony-data";
-
-type ParsedCSV = {
-  headers: string[];
-  rows: number[][];
-  preview: number[][];
-};
-
-function parseCSV(text: string): ParsedCSV {
-  const lines = text.trim().split(/\r?\n/);
-  const headers = lines[0].split(/[,\t]/).map((h) => h.trim().replace(/^"|"$/g, ""));
-  const rows = lines.slice(1).map((line) =>
-    line.split(/[,\t]/).map((v) => {
-      const n = parseFloat(v.trim().replace(/^"|"$/g, ""));
-      return isNaN(n) ? 0 : n;
-    })
-  );
-  return { headers, rows, preview: rows.slice(0, 5) };
-}
+import {
+  parseCSV,
+  detectColumns,
+  extractSignalGroups,
+  type ParsedCSV,
+  type ColumnDetection,
+  type SignalGroup,
+} from "@/lib/csv-parser";
 
 type StreamMapping = {
   file: File;
   parsed: ParsedCSV;
+  detection: ColumnDetection;
+  signalGroups: SignalGroup[];
   modality: string;
   indexName: string;
   timestampCol: number;
@@ -46,6 +55,8 @@ type StreamMapping = {
   person2Col: number;
   sampleRateHz: number;
   unit: string;
+  timeOffsetMs: number; // temporal anchor offset
+  timeUnit: "ms" | "s" | "samples";
 };
 
 const ImportPage = () => {
@@ -73,18 +84,37 @@ const ImportPage = () => {
     for (const file of Array.from(files)) {
       const text = await file.text();
       const parsed = parseCSV(text);
+      const detection = detectColumns(parsed);
+      const signalGroups = extractSignalGroups(parsed, detection);
+
+      // Auto-assign columns from detection
+      const timestampCol = detection.timestampCols[0] ?? 0;
+      const person1Col = detection.person1Cols[0] ?? (timestampCol === 0 ? 1 : 0);
+      const person2Col = detection.person2Cols[0] ?? Math.min(person1Col + 1, parsed.headers.length - 1);
+
+      // Try to guess modality from headers
+      const headerJoined = parsed.headers.join(" ").toLowerCase();
+      let guessedModality = "behavioral";
+      if (/eeg|fnirs|nirs|fmri|alpha|theta|beta|gamma|plv|coherence/.test(headerJoined)) guessedModality = "neural";
+      else if (/hr|heart|eda|scl|gsr|resp|ibi|bpm|ppg|ecg/.test(headerJoined)) guessedModality = "bio";
+      else if (/ios|rapport|flow|likert|rating/.test(headerJoined)) guessedModality = "psycho";
+
       setStreams((prev) => [
         ...prev,
         {
           file,
           parsed,
-          modality: "behavioral",
+          detection,
+          signalGroups,
+          modality: guessedModality,
           indexName: "",
-          timestampCol: 0,
-          person1Col: 1,
-          person2Col: 2,
-          sampleRateHz: 30,
+          timestampCol,
+          person1Col,
+          person2Col,
+          sampleRateHz: guessedModality === "neural" ? 250 : guessedModality === "bio" ? 4 : 30,
           unit: "a.u.",
+          timeOffsetMs: 0,
+          timeUnit: "ms",
         },
       ]);
     }
@@ -97,6 +127,20 @@ const ImportPage = () => {
 
   const removeStream = (idx: number) => {
     setStreams((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const redetectColumns = (idx: number) => {
+    const stream = streams[idx];
+    const detection = detectColumns(stream.parsed);
+    const signalGroups = extractSignalGroups(stream.parsed, detection);
+    updateStream(idx, {
+      detection,
+      signalGroups,
+      timestampCol: detection.timestampCols[0] ?? stream.timestampCol,
+      person1Col: detection.person1Cols[0] ?? stream.person1Col,
+      person2Col: detection.person2Cols[0] ?? stream.person2Col,
+    });
+    toast.success("Re-analyzed column structure");
   };
 
   const handleImport = async () => {
@@ -126,10 +170,12 @@ const ImportPage = () => {
       if (dsError) throw dsError;
 
       for (const stream of streams) {
+        const timeMultiplier = stream.timeUnit === "s" ? 1000 : stream.timeUnit === "samples" ? (1000 / stream.sampleRateHz) : 1;
+
         const timeseriesData = stream.parsed.rows.map((row) => ({
-          t: row[stream.timestampCol] ?? 0,
-          p1: row[stream.person1Col] ?? 0,
-          p2: row[stream.person2Col] ?? 0,
+          t: ((Number(row[stream.timestampCol]) || 0) * timeMultiplier) + stream.timeOffsetMs,
+          p1: Number(row[stream.person1Col]) || 0,
+          p2: Number(row[stream.person2Col]) || 0,
         }));
 
         const { error } = await supabase.from("data_streams").insert({
@@ -144,6 +190,11 @@ const ImportPage = () => {
             person2: stream.parsed.headers[stream.person2Col],
           },
           data: timeseriesData,
+          metadata: {
+            timeOffsetMs: stream.timeOffsetMs,
+            timeUnit: stream.timeUnit,
+            detectionConfidence: stream.detection.confidence,
+          },
         });
         if (error) throw error;
       }
@@ -161,224 +212,330 @@ const ImportPage = () => {
     }
   };
 
-  const indexOptions = SYNCHRONY_INDICES.map((idx) => ({
-    value: idx.id,
-    label: `${idx.name} (${idx.modality})`,
-    modality: idx.modality,
-  }));
-
   return (
-    <div className="p-6 max-w-[1000px] space-y-6">
-      <div>
-        <h2 className="font-heading text-2xl font-bold">Data Import Portal</h2>
-        <p className="text-sm text-muted-foreground mt-1">
-          Import CSV/TSV timeseries data for multimodal synchrony analysis
-        </p>
-      </div>
-
-      <Card className="glass-panel p-5 space-y-4">
-        <div className="flex items-center gap-2">
-          <Plus className="w-4 h-4 text-accent" />
-          <h3 className="font-heading text-sm font-semibold">New Dataset</h3>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="space-y-2">
-            <Label className="text-xs font-heading">Dataset Name</Label>
-            <Input
-              value={datasetName}
-              onChange={(e) => setDatasetName(e.target.value)}
-              placeholder="e.g., Dyad_001_Session_1"
-              className="h-9 text-sm"
-            />
-          </div>
-          <div className="space-y-2">
-            <Label className="text-xs font-heading">Description</Label>
-            <Input
-              value={datasetDesc}
-              onChange={(e) => setDatasetDesc(e.target.value)}
-              placeholder="Optional description"
-              className="h-9 text-sm"
-            />
-          </div>
-        </div>
-
-        <Separator />
-
-        <div className="border-2 border-dashed border-border rounded-lg p-6 text-center">
-          <Upload className="w-8 h-8 text-muted-foreground mx-auto mb-2" />
-          <p className="text-sm text-muted-foreground mb-2">
-            Drop CSV/TSV files here, or click to browse
+    <TooltipProvider>
+      <div className="p-6 max-w-[1000px] space-y-6">
+        <div>
+          <h2 className="font-heading text-2xl font-bold">Data Import Portal</h2>
+          <p className="text-sm text-muted-foreground mt-1">
+            Import CSV/TSV timeseries with smart column detection for multimodal synchrony analysis
           </p>
-          <p className="text-[10px] text-muted-foreground mb-3">
-            Each file = one synchrony index. Columns: timestamp, person1_signal, person2_signal
-          </p>
-          <label>
-            <input
-              type="file"
-              accept=".csv,.tsv,.txt"
-              multiple
-              onChange={handleFileSelect}
-              className="hidden"
-            />
-            <Button variant="outline" size="sm" asChild>
-              <span className="cursor-pointer">
-                <FileSpreadsheet className="w-4 h-4 mr-2" />
-                Select Files
-              </span>
-            </Button>
-          </label>
         </div>
 
-        {streams.map((stream, idx) => (
-          <Card key={idx} className="p-4 bg-muted/30 space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <FileSpreadsheet className="w-4 h-4 text-accent" />
-                <span className="text-sm font-medium font-heading">{stream.file.name}</span>
-                <Badge variant="secondary" className="text-[10px]">
-                  {stream.parsed.headers.length} cols × {stream.parsed.rows.length} rows
-                </Badge>
-              </div>
-              <Button variant="ghost" size="icon" onClick={() => removeStream(idx)} className="h-7 w-7">
-                <Trash2 className="w-3.5 h-3.5" />
+        <Card className="glass-panel p-5 space-y-4">
+          <div className="flex items-center gap-2">
+            <Plus className="w-4 h-4 text-accent" />
+            <h3 className="font-heading text-sm font-semibold">New Dataset</h3>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label className="text-xs font-heading">Dataset Name</Label>
+              <Input
+                value={datasetName}
+                onChange={(e) => setDatasetName(e.target.value)}
+                placeholder="e.g., Dyad_001_Session_1"
+                className="h-9 text-sm"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label className="text-xs font-heading">Description</Label>
+              <Input
+                value={datasetDesc}
+                onChange={(e) => setDatasetDesc(e.target.value)}
+                placeholder="Optional description"
+                className="h-9 text-sm"
+              />
+            </div>
+          </div>
+
+          <Separator />
+
+          <div className="border-2 border-dashed border-border rounded-lg p-6 text-center">
+            <Upload className="w-8 h-8 text-muted-foreground mx-auto mb-2" />
+            <p className="text-sm text-muted-foreground mb-2">
+              Drop CSV/TSV files here, or click to browse
+            </p>
+            <p className="text-[10px] text-muted-foreground mb-3">
+              Smart detection: auto-identifies timestamp, Person 1, and Person 2 columns from headers.
+              Supports formats: <code>signal_p1, signal_p2</code> | <code>participant_1, participant_2</code> | generic numeric columns.
+            </p>
+            <label>
+              <input
+                type="file"
+                accept=".csv,.tsv,.txt"
+                multiple
+                onChange={handleFileSelect}
+                className="hidden"
+              />
+              <Button variant="outline" size="sm" asChild>
+                <span className="cursor-pointer">
+                  <FileSpreadsheet className="w-4 h-4 mr-2" />
+                  Select Files
+                </span>
               </Button>
-            </div>
+            </label>
+          </div>
 
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <div className="space-y-1">
-                <Label className="text-[10px]">Modality</Label>
-                <Select value={stream.modality} onValueChange={(v) => updateStream(idx, { modality: v })}>
-                  <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="neural">Neural</SelectItem>
-                    <SelectItem value="behavioral">Behavioral</SelectItem>
-                    <SelectItem value="bio">Biosynchrony</SelectItem>
-                    <SelectItem value="psycho">Psycho-synchrony</SelectItem>
-                  </SelectContent>
-                </Select>
+          {streams.map((stream, idx) => (
+            <Card key={idx} className="p-4 bg-muted/30 space-y-3">
+              {/* File Header */}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <FileSpreadsheet className="w-4 h-4 text-accent" />
+                  <span className="text-sm font-medium font-heading">{stream.file.name}</span>
+                  <Badge variant="secondary" className="text-[10px]">
+                    {stream.parsed.headers.length} cols × {stream.parsed.rows.length} rows
+                  </Badge>
+                </div>
+                <div className="flex items-center gap-1">
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button variant="ghost" size="icon" onClick={() => redetectColumns(idx)} className="h-7 w-7">
+                        <RefreshCw className="w-3.5 h-3.5" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Re-detect columns</TooltipContent>
+                  </Tooltip>
+                  <Button variant="ghost" size="icon" onClick={() => removeStream(idx)} className="h-7 w-7">
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </Button>
+                </div>
               </div>
-              <div className="space-y-1">
-                <Label className="text-[10px]">Index Name</Label>
-                <Input
-                  value={stream.indexName}
-                  onChange={(e) => updateStream(idx, { indexName: e.target.value })}
-                  placeholder="e.g., gaze_coordination"
-                  className="h-8 text-xs"
-                />
-              </div>
-              <div className="space-y-1">
-                <Label className="text-[10px]">Sample Rate (Hz)</Label>
-                <Input
-                  type="number"
-                  value={stream.sampleRateHz}
-                  onChange={(e) => updateStream(idx, { sampleRateHz: parseFloat(e.target.value) || 0 })}
-                  className="h-8 text-xs"
-                />
-              </div>
-              <div className="space-y-1">
-                <Label className="text-[10px]">Unit</Label>
-                <Input
-                  value={stream.unit}
-                  onChange={(e) => updateStream(idx, { unit: e.target.value })}
-                  className="h-8 text-xs"
-                />
-              </div>
-            </div>
 
-            <div className="grid grid-cols-3 gap-3">
-              {[
-                { label: "Timestamp Column", key: "timestampCol" as const },
-                { label: "Person 1 Signal", key: "person1Col" as const },
-                { label: "Person 2 Signal", key: "person2Col" as const },
-              ].map((col) => (
-                <div key={col.key} className="space-y-1">
-                  <Label className="text-[10px]">{col.label}</Label>
-                  <Select
-                    value={String(stream[col.key])}
-                    onValueChange={(v) => updateStream(idx, { [col.key]: parseInt(v) })}
-                  >
+              {/* Detection Results */}
+              {stream.detection && (
+                <div className="rounded-md bg-muted/50 p-3 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-3.5 h-3.5 text-accent" />
+                    <span className="text-[11px] font-heading font-semibold">Auto-Detection</span>
+                    <Badge
+                      variant={stream.detection.confidence >= 0.8 ? "default" : stream.detection.confidence >= 0.5 ? "secondary" : "destructive"}
+                      className="text-[9px]"
+                    >
+                      {Math.round(stream.detection.confidence * 100)}% confidence
+                    </Badge>
+                  </div>
+                  {stream.detection.suggestions.length > 0 && (
+                    <div className="space-y-0.5">
+                      {stream.detection.suggestions.map((s, i) => (
+                        <p key={i} className="text-[10px] text-muted-foreground">{s}</p>
+                      ))}
+                    </div>
+                  )}
+                  {stream.signalGroups.length > 1 && (
+                    <div className="text-[10px] text-accent">
+                      ℹ️ Detected {stream.signalGroups.length} paired signal groups: {stream.signalGroups.map((g) => g.signalName).join(", ")}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Modality & Index */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div className="space-y-1">
+                  <Label className="text-[10px]">Modality</Label>
+                  <Select value={stream.modality} onValueChange={(v) => updateStream(idx, { modality: v })}>
                     <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      {stream.parsed.headers.map((h, hi) => (
-                        <SelectItem key={hi} value={String(hi)}>{h}</SelectItem>
-                      ))}
+                      <SelectItem value="neural">Neural</SelectItem>
+                      <SelectItem value="behavioral">Behavioral</SelectItem>
+                      <SelectItem value="bio">Biosynchrony</SelectItem>
+                      <SelectItem value="psycho">Psycho-synchrony</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
-              ))}
-            </div>
-
-            <div className="overflow-x-auto">
-              <table className="text-[10px] w-full">
-                <thead>
-                  <tr>
-                    {stream.parsed.headers.map((h, i) => (
-                      <th key={i} className="px-2 py-1 text-left text-muted-foreground font-medium">
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {stream.parsed.preview.map((row, ri) => (
-                    <tr key={ri} className="border-t border-border/30">
-                      {row.map((val, ci) => (
-                        <td key={ci} className="px-2 py-1 font-mono">{val.toFixed(4)}</td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </Card>
-        ))}
-
-        {streams.length > 0 && (
-          <Button onClick={handleImport} disabled={uploading} className="w-full">
-            {uploading ? (
-              "Importing..."
-            ) : (
-              <>
-                <Database className="w-4 h-4 mr-2" />
-                Import {streams.length} Stream{streams.length > 1 ? "s" : ""} to Database
-              </>
-            )}
-          </Button>
-        )}
-      </Card>
-
-      <Card className="glass-panel p-5 space-y-3">
-        <h3 className="font-heading text-sm font-semibold">Existing Datasets</h3>
-        {!datasets || datasets.length === 0 ? (
-          <p className="text-xs text-muted-foreground">No datasets imported yet.</p>
-        ) : (
-          <div className="space-y-2">
-            {datasets.map((ds) => (
-              <div key={ds.id} className="flex items-center justify-between p-3 bg-muted/30 rounded-lg">
-                <div>
-                  <p className="text-sm font-medium font-heading">{ds.name}</p>
-                  <p className="text-[10px] text-muted-foreground">{ds.description}</p>
+                <div className="space-y-1">
+                  <Label className="text-[10px]">Index Name</Label>
+                  <Input
+                    value={stream.indexName}
+                    onChange={(e) => updateStream(idx, { indexName: e.target.value })}
+                    placeholder="e.g., gaze_coordination"
+                    className="h-8 text-xs"
+                  />
                 </div>
-                <div className="flex items-center gap-2">
-                  {ds.modalities?.map((m) => (
-                    <Badge key={m} variant="outline" className="text-[10px] capitalize">{m}</Badge>
-                  ))}
-                  <Badge
-                    variant={ds.status === "complete" ? "default" : "secondary"}
-                    className="text-[10px]"
-                  >
-                    {ds.status === "complete" && <Check className="w-3 h-3 mr-1" />}
-                    {ds.status === "error" && <AlertCircle className="w-3 h-3 mr-1" />}
-                    {ds.status}
-                  </Badge>
+                <div className="space-y-1">
+                  <Label className="text-[10px]">Sample Rate (Hz)</Label>
+                  <Input
+                    type="number"
+                    value={stream.sampleRateHz}
+                    onChange={(e) => updateStream(idx, { sampleRateHz: parseFloat(e.target.value) || 0 })}
+                    className="h-8 text-xs"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-[10px]">Unit</Label>
+                  <Input
+                    value={stream.unit}
+                    onChange={(e) => updateStream(idx, { unit: e.target.value })}
+                    className="h-8 text-xs"
+                  />
                 </div>
               </div>
-            ))}
-          </div>
-        )}
-      </Card>
-    </div>
+
+              {/* Column Mapping */}
+              <div className="grid grid-cols-3 gap-3">
+                {[
+                  { label: "Timestamp Column", key: "timestampCol" as const, detected: stream.detection.timestampCols },
+                  { label: "Person 1 Signal", key: "person1Col" as const, detected: stream.detection.person1Cols },
+                  { label: "Person 2 Signal", key: "person2Col" as const, detected: stream.detection.person2Cols },
+                ].map((col) => (
+                  <div key={col.key} className="space-y-1">
+                    <div className="flex items-center gap-1">
+                      <Label className="text-[10px]">{col.label}</Label>
+                      {col.detected.length > 0 && (
+                        <Sparkles className="w-2.5 h-2.5 text-accent" />
+                      )}
+                    </div>
+                    <Select
+                      value={String(stream[col.key])}
+                      onValueChange={(v) => updateStream(idx, { [col.key]: parseInt(v) })}
+                    >
+                      <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {stream.parsed.headers.map((h, hi) => (
+                          <SelectItem key={hi} value={String(hi)}>
+                            {h}
+                            {col.detected.includes(hi) ? " ✓" : ""}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                ))}
+              </div>
+
+              {/* Temporal Anchor */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-1">
+                    <Label className="text-[10px]">Time Unit</Label>
+                    <Tooltip>
+                      <TooltipTrigger><Info className="w-2.5 h-2.5 text-muted-foreground" /></TooltipTrigger>
+                      <TooltipContent className="max-w-[200px] text-xs">
+                        How timestamps are encoded in this file. Milliseconds, seconds, or sample index.
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                  <Select value={stream.timeUnit} onValueChange={(v) => updateStream(idx, { timeUnit: v as any })}>
+                    <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="ms">Milliseconds</SelectItem>
+                      <SelectItem value="s">Seconds</SelectItem>
+                      <SelectItem value="samples">Sample Index</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <div className="flex items-center gap-1">
+                    <Label className="text-[10px]">Time Offset (ms)</Label>
+                    <Tooltip>
+                      <TooltipTrigger><Info className="w-2.5 h-2.5 text-muted-foreground" /></TooltipTrigger>
+                      <TooltipContent className="max-w-[250px] text-xs">
+                        Shift this stream's timestamps. Use this to align streams that started recording at different times (e.g., EEG started 5s before video → offset = -5000).
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                  <Input
+                    type="number"
+                    value={stream.timeOffsetMs}
+                    onChange={(e) => updateStream(idx, { timeOffsetMs: parseFloat(e.target.value) || 0 })}
+                    placeholder="0"
+                    className="h-8 text-xs"
+                  />
+                </div>
+              </div>
+
+              {/* Data Preview */}
+              <div className="overflow-x-auto">
+                <table className="text-[10px] w-full">
+                  <thead>
+                    <tr>
+                      {stream.parsed.headers.map((h, i) => {
+                        const isTimestamp = i === stream.timestampCol;
+                        const isP1 = i === stream.person1Col;
+                        const isP2 = i === stream.person2Col;
+                        return (
+                          <th
+                            key={i}
+                            className={`px-2 py-1 text-left font-medium ${
+                              isTimestamp ? "text-accent bg-accent/10" :
+                              isP1 ? "text-primary bg-primary/10" :
+                              isP2 ? "text-secondary-foreground bg-secondary/30" :
+                              "text-muted-foreground"
+                            }`}
+                          >
+                            {h}
+                            {isTimestamp && " ⏱"}
+                            {isP1 && " 👤₁"}
+                            {isP2 && " 👤₂"}
+                          </th>
+                        );
+                      })}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {stream.parsed.preview.map((row, ri) => (
+                      <tr key={ri} className="border-t border-border/30">
+                        {row.map((val, ci) => (
+                          <td key={ci} className="px-2 py-1 font-mono">
+                            {typeof val === "number" ? val.toFixed(4) : String(val)}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          ))}
+
+          {streams.length > 0 && (
+            <Button onClick={handleImport} disabled={uploading} className="w-full">
+              {uploading ? (
+                "Importing..."
+              ) : (
+                <>
+                  <Database className="w-4 h-4 mr-2" />
+                  Import {streams.length} Stream{streams.length > 1 ? "s" : ""} to Database
+                </>
+              )}
+            </Button>
+          )}
+        </Card>
+
+        <Card className="glass-panel p-5 space-y-3">
+          <h3 className="font-heading text-sm font-semibold">Existing Datasets</h3>
+          {!datasets || datasets.length === 0 ? (
+            <p className="text-xs text-muted-foreground">No datasets imported yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {datasets.map((ds) => (
+                <div key={ds.id} className="flex items-center justify-between p-3 bg-muted/30 rounded-lg">
+                  <div>
+                    <p className="text-sm font-medium font-heading">{ds.name}</p>
+                    <p className="text-[10px] text-muted-foreground">{ds.description}</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {ds.modalities?.map((m) => (
+                      <Badge key={m} variant="outline" className="text-[10px] capitalize">{m}</Badge>
+                    ))}
+                    <Badge
+                      variant={ds.status === "complete" ? "default" : "secondary"}
+                      className="text-[10px]"
+                    >
+                      {ds.status === "complete" && <Check className="w-3 h-3 mr-1" />}
+                      {ds.status === "error" && <AlertCircle className="w-3 h-3 mr-1" />}
+                      {ds.status}
+                    </Badge>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      </div>
+    </TooltipProvider>
   );
 };
 

@@ -31,9 +31,12 @@ import {
   Sparkles,
   Info,
   RefreshCw,
+  Beaker,
+  ExternalLink,
 } from "lucide-react";
 import { toast } from "sonner";
 import { SYNCHRONY_INDICES } from "@/lib/synchrony-data";
+import { SAMPLE_DATASETS, type SampleDataset } from "@/lib/sample-datasets";
 import {
   parseCSV,
   detectColumns,

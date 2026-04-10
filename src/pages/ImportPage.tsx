@@ -68,7 +68,54 @@ const ImportPage = () => {
   const [datasetName, setDatasetName] = useState("");
   const [datasetDesc, setDatasetDesc] = useState("");
   const [streams, setStreams] = useState<StreamMapping[]>([]);
+  const [loadingDemo, setLoadingDemo] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+
+  const handleLoadSampleDataset = async (sample: SampleDataset) => {
+    setLoadingDemo(sample.name);
+    try {
+      const { data: dataset, error: dsError } = await supabase
+        .from("datasets")
+        .insert({
+          name: sample.name,
+          description: `${sample.description}\n\nSource: ${sample.citation}`,
+          modalities: [sample.modality],
+          status: "processing",
+        })
+        .select()
+        .single();
+      if (dsError) throw dsError;
+
+      for (const stream of sample.streams) {
+        const timeseriesData = stream.generateData();
+        const { error } = await supabase.from("data_streams").insert({
+          dataset_id: dataset.id,
+          modality: sample.modality,
+          index_name: stream.indexName,
+          sample_rate_hz: stream.sampleRateHz,
+          unit: stream.unit,
+          column_mapping: { timestamp: "t", person1: "p1", person2: "p2" },
+          data: timeseriesData as any,
+          metadata: {
+            source: "osf_sample",
+            osfUrl: sample.osfUrl,
+            citation: sample.citation,
+            authors: sample.authors,
+            year: sample.year,
+          },
+        });
+        if (error) throw error;
+      }
+
+      await supabase.from("datasets").update({ status: "complete" }).eq("id", dataset.id);
+      toast.success(`Loaded sample: "${sample.name}"`);
+      queryClient.invalidateQueries({ queryKey: ["datasets"] });
+    } catch (err: any) {
+      toast.error(err.message || "Failed to load sample dataset");
+    } finally {
+      setLoadingDemo(null);
+    }
+  };
 
   const { data: datasets } = useQuery({
     queryKey: ["datasets"],

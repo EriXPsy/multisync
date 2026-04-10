@@ -31,9 +31,12 @@ import {
   Sparkles,
   Info,
   RefreshCw,
+  Beaker,
+  ExternalLink,
 } from "lucide-react";
 import { toast } from "sonner";
 import { SYNCHRONY_INDICES } from "@/lib/synchrony-data";
+import { SAMPLE_DATASETS, type SampleDataset } from "@/lib/sample-datasets";
 import {
   parseCSV,
   detectColumns,
@@ -65,7 +68,54 @@ const ImportPage = () => {
   const [datasetName, setDatasetName] = useState("");
   const [datasetDesc, setDatasetDesc] = useState("");
   const [streams, setStreams] = useState<StreamMapping[]>([]);
+  const [loadingDemo, setLoadingDemo] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+
+  const handleLoadSampleDataset = async (sample: SampleDataset) => {
+    setLoadingDemo(sample.name);
+    try {
+      const { data: dataset, error: dsError } = await supabase
+        .from("datasets")
+        .insert({
+          name: sample.name,
+          description: `${sample.description}\n\nSource: ${sample.citation}`,
+          modalities: [sample.modality],
+          status: "processing",
+        })
+        .select()
+        .single();
+      if (dsError) throw dsError;
+
+      for (const stream of sample.streams) {
+        const timeseriesData = stream.generateData();
+        const { error } = await supabase.from("data_streams").insert({
+          dataset_id: dataset.id,
+          modality: sample.modality,
+          index_name: stream.indexName,
+          sample_rate_hz: stream.sampleRateHz,
+          unit: stream.unit,
+          column_mapping: { timestamp: "t", person1: "p1", person2: "p2" },
+          data: timeseriesData as any,
+          metadata: {
+            source: "osf_sample",
+            osfUrl: sample.osfUrl,
+            citation: sample.citation,
+            authors: sample.authors,
+            year: sample.year,
+          },
+        });
+        if (error) throw error;
+      }
+
+      await supabase.from("datasets").update({ status: "complete" }).eq("id", dataset.id);
+      toast.success(`Loaded sample: "${sample.name}"`);
+      queryClient.invalidateQueries({ queryKey: ["datasets"] });
+    } catch (err: any) {
+      toast.error(err.message || "Failed to load sample dataset");
+    } finally {
+      setLoadingDemo(null);
+    }
+  };
 
   const { data: datasets } = useQuery({
     queryKey: ["datasets"],
@@ -530,8 +580,58 @@ const ImportPage = () => {
           )}
         </Card>
 
+        <Card className="glass-panel p-5 space-y-4">
+          <div className="flex items-center gap-2">
+            <Beaker className="w-4 h-4 text-accent" />
+            <h3 className="font-heading text-sm font-semibold">Sample Datasets from OSF</h3>
+            <Badge variant="outline" className="text-[9px]">Open Science</Badge>
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            Load demo data generated to match real synchrony research. Each dataset mirrors the signal characteristics,
+            sample rates, and data structures described in the cited publications.
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {SAMPLE_DATASETS.map((sample) => (
+              <div key={sample.name} className="p-3 bg-muted/30 rounded-lg space-y-2">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-xs font-medium font-heading leading-tight">{sample.name}</p>
+                    <p className="text-[10px] text-muted-foreground mt-0.5 line-clamp-2">{sample.description}</p>
+                  </div>
+                  <Badge variant="outline" className="text-[9px] capitalize shrink-0">{sample.modality}</Badge>
+                </div>
+                <div className="text-[9px] text-muted-foreground italic line-clamp-2">{sample.citation}</div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 text-[10px]"
+                    onClick={() => handleLoadSampleDataset(sample)}
+                    disabled={loadingDemo !== null}
+                  >
+                    {loadingDemo === sample.name ? "Loading..." : (
+                      <>
+                        <Database className="w-3 h-3 mr-1" />
+                        Import Sample
+                      </>
+                    )}
+                  </Button>
+                  <a
+                    href={sample.osfUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[10px] text-accent hover:underline flex items-center gap-0.5"
+                  >
+                    <ExternalLink className="w-2.5 h-2.5" />
+                    OSF
+                  </a>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+
         <Card className="glass-panel p-5 space-y-3">
-          <h3 className="font-heading text-sm font-semibold">Existing Datasets</h3>
           {!datasets || datasets.length === 0 ? (
             <p className="text-xs text-muted-foreground">No datasets imported yet.</p>
           ) : (

@@ -42,6 +42,7 @@ import {
   type ColumnDetection,
   type SignalGroup,
 } from "@/lib/csv-parser";
+import { parseEDF, edfToParsedCSV } from "@/lib/edf-parser";
 
 type StreamMapping = {
   file: File;
@@ -82,8 +83,28 @@ const ImportPage = () => {
     const files = e.target.files;
     if (!files) return;
     for (const file of Array.from(files)) {
-      const text = await file.text();
-      const parsed = parseCSV(text);
+      let parsed: ParsedCSV;
+
+      // Handle EDF binary files
+      if (file.name.toLowerCase().endsWith(".edf")) {
+        try {
+          const buffer = await file.arrayBuffer();
+          const edf = parseEDF(buffer);
+          parsed = edfToParsedCSV(edf);
+          parsed.formatHint = {
+            format: "edf",
+            description: `EDF: ${edf.signals.length} channels, ${edf.durationSeconds}s, patient: ${edf.header.patientId}`,
+            detectedSampleRate: Math.max(...edf.sampleRates),
+          };
+        } catch (err: any) {
+          toast.error(`Failed to parse EDF file: ${err.message}`);
+          continue;
+        }
+      } else {
+        const text = await file.text();
+        parsed = parseCSV(text, file.name);
+      }
+
       const detection = detectColumns(parsed);
       const signalGroups = extractSignalGroups(parsed, detection);
 
@@ -111,10 +132,10 @@ const ImportPage = () => {
           timestampCol,
           person1Col,
           person2Col,
-          sampleRateHz: guessedModality === "neural" ? 250 : guessedModality === "bio" ? 4 : 30,
+          sampleRateHz: parsed.formatHint?.detectedSampleRate ?? (guessedModality === "neural" ? 250 : guessedModality === "bio" ? 4 : 30),
           unit: "a.u.",
           timeOffsetMs: 0,
-          timeUnit: "ms",
+          timeUnit: parsed.formatHint?.format === "empatica" ? "s" : "ms",
         },
       ]);
     }
@@ -254,16 +275,16 @@ const ImportPage = () => {
           <div className="border-2 border-dashed border-border rounded-lg p-6 text-center">
             <Upload className="w-8 h-8 text-muted-foreground mx-auto mb-2" />
             <p className="text-sm text-muted-foreground mb-2">
-              Drop CSV/TSV files here, or click to browse
+              Drop files here, or click to browse
             </p>
             <p className="text-[10px] text-muted-foreground mb-3">
-              Smart detection: auto-identifies timestamp, Person 1, and Person 2 columns from headers.
-              Supports formats: <code>signal_p1, signal_p2</code> | <code>participant_1, participant_2</code> | generic numeric columns.
+              Supports: <strong>CSV/TSV</strong>, <strong>EDF</strong> (EEG), <strong>Empatica E4</strong>, <strong>rMEA</strong>, <strong>OpenSignals</strong>, <strong>Biopac</strong>, <strong>IBI</strong>, and more.
+              Auto-detects dyadic columns from headers like <code>mother_hr/infant_hr</code>, <code>sub01_hbo/sub02_hbo</code>, <code>signal_p1/signal_p2</code>.
             </p>
             <label>
               <input
                 type="file"
-                accept=".csv,.tsv,.txt"
+                accept=".csv,.tsv,.txt,.edf"
                 multiple
                 onChange={handleFileSelect}
                 className="hidden"

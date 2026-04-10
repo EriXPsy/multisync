@@ -305,9 +305,14 @@ const ImportPage = () => {
                 <div className="flex items-center gap-2">
                   <FileSpreadsheet className="w-4 h-4 text-accent" />
                   <span className="text-sm font-medium font-heading">{stream.file.name}</span>
-                  <Badge variant="secondary" className="text-[10px]">
+                   <Badge variant="secondary" className="text-[10px]">
                     {stream.parsed.headers.length} cols × {stream.parsed.rows.length} rows
                   </Badge>
+                  {stream.parsed.formatHint && (
+                    <Badge variant="outline" className="text-[10px] border-accent/50 text-accent">
+                      {stream.parsed.formatHint.format.toUpperCase()}
+                    </Badge>
+                  )}
                 </div>
                 <div className="flex items-center gap-1">
                   <Tooltip>

@@ -48,6 +48,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { DEFAULT_WCC_PARAMS } from "@/lib/synchrony-data";
+import { runCascadeAnalysis } from "@/lib/cascade-analysis";
 import type { Json } from "@/integrations/supabase/types";
 
 const STEPS = [

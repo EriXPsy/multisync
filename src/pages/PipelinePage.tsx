@@ -117,7 +117,6 @@ type StreamOffset = { streamId: string; offsetMs: number; anchorMethod: "none" |
 const PipelinePage = () => {
   const queryClient = useQueryClient();
   const [step, setStep] = useState(1);
-  const [selectedDatasetId, setSelectedDatasetId] = useState("");
   const [selectedStreamIds, setSelectedStreamIds] = useState<string[]>([]);
   const [epochMs, setEpochMs] = useState(10000);
   const [normalization, setNormalization] = useState<"zscore" | "minmax">("zscore");
@@ -126,6 +125,7 @@ const PipelinePage = () => {
   const [alignmentReport, setAlignmentReport] = useState<any>(null);
   const [running, setRunning] = useState(false);
 
+  // Fetch ALL datasets
   const { data: datasets } = useQuery({
     queryKey: ["datasets"],
     queryFn: async () => {
@@ -135,16 +135,41 @@ const PipelinePage = () => {
     },
   });
 
-  const { data: streams } = useQuery({
-    queryKey: ["data_streams", selectedDatasetId],
+  // Fetch ALL streams across ALL complete datasets
+  const { data: allStreams } = useQuery({
+    queryKey: ["all_data_streams"],
     queryFn: async () => {
-      if (!selectedDatasetId) return [];
-      const { data, error } = await supabase.from("data_streams").select("*").eq("dataset_id", selectedDatasetId);
+      const { data, error } = await supabase.from("data_streams").select("*");
       if (error) throw error;
       return data;
     },
-    enabled: !!selectedDatasetId,
   });
+
+  // Group streams by dataset for display
+  const streamsByDataset = useMemo(() => {
+    if (!allStreams || !datasets) return [];
+    const completeIds = new Set(datasets.filter((d) => d.status === "complete").map((d) => d.id));
+    const groups: { dataset: typeof datasets[0]; streams: typeof allStreams }[] = [];
+    for (const ds of datasets) {
+      if (!completeIds.has(ds.id)) continue;
+      const dsStreams = allStreams.filter((s) => s.dataset_id === ds.id);
+      if (dsStreams.length > 0) groups.push({ dataset: ds, streams: dsStreams });
+    }
+    return groups;
+  }, [allStreams, datasets]);
+
+  // Detect cross-dataset selection
+  const selectedDatasetIds = useMemo(() => {
+    if (!allStreams) return new Set<string>();
+    const ids = new Set<string>();
+    for (const id of selectedStreamIds) {
+      const stream = allStreams.find((s) => s.id === id);
+      if (stream) ids.add(stream.dataset_id);
+    }
+    return ids;
+  }, [selectedStreamIds, allStreams]);
+
+  const isCrossDataset = selectedDatasetIds.size > 1;
 
   const toggleStream = (id: string) => {
     setSelectedStreamIds((prev) =>
@@ -166,13 +191,12 @@ const PipelinePage = () => {
   };
 
   const autoDetectAnchors = () => {
-    if (!streams) return;
-    const selected = streams.filter((s) => selectedStreamIds.includes(s.id));
-    
-    // Find earliest timestamp across all streams to use as reference
+    if (!allStreams) return;
+    const selected = allStreams.filter((s) => selectedStreamIds.includes(s.id));
+
     let globalMinT = Infinity;
     const streamMinTs: Record<string, number> = {};
-    
+
     for (const stream of selected) {
       const rawData = (stream.data as StreamData[]) || [];
       if (rawData.length === 0) continue;
@@ -181,7 +205,6 @@ const PipelinePage = () => {
       if (minT < globalMinT) globalMinT = minT;
     }
 
-    // Set offsets so all streams align to the earliest start
     const newOffsets = { ...streamOffsets };
     for (const stream of selected) {
       const streamMin = streamMinTs[stream.id] ?? 0;
@@ -196,22 +219,21 @@ const PipelinePage = () => {
   };
 
   const runAnalysis = async () => {
-    if (!selectedDatasetId || selectedStreamIds.length === 0) {
+    if (selectedStreamIds.length === 0) {
       toast.error("Select data streams first");
       return;
     }
 
     setRunning(true);
     try {
-      const selectedStreams = streams?.filter((s) => selectedStreamIds.includes(s.id)) || [];
-      const report: any = { streams: [], alignment: {}, offsets: {} };
+      const selectedStreams = allStreams?.filter((s) => selectedStreamIds.includes(s.id)) || [];
+      const report: any = { streams: [], alignment: {}, offsets: {}, crossDataset: isCrossDataset };
       const modalityResults: Record<string, number[]> = {};
 
       for (const stream of selectedStreams) {
         let rawData = (stream.data as StreamData[]) || [];
         if (rawData.length === 0) continue;
 
-        // Apply temporal offset
         const offset = streamOffsets[stream.id]?.offsetMs || 0;
         if (offset !== 0) {
           rawData = rawData.map((d) => ({ ...d, t: d.t + offset }));
@@ -237,10 +259,12 @@ const PipelinePage = () => {
 
         const tMin = rawData[0]?.t ?? 0;
         const tMax = rawData[rawData.length - 1]?.t ?? 0;
+        const dsName = datasets?.find((d) => d.id === stream.dataset_id)?.name || "Unknown";
 
         report.streams.push({
           name: stream.index_name,
           modality: stream.modality,
+          datasetName: dsName,
           rawSamples: rawData.length,
           wccWindows: wccValues.length,
           epochedPoints: epoched.length,
@@ -274,14 +298,19 @@ const PipelinePage = () => {
       setAlignmentReport(report);
       setAnalysisResults(chartData);
 
-      await supabase.from("analysis_runs").insert({
-        dataset_id: selectedDatasetId,
-        name: `Analysis ${new Date().toLocaleString()}`,
-        config: { epochMs, normalization, streamIds: selectedStreamIds, offsets: report.offsets } as unknown as Json,
-        status: "complete",
-        results: chartData as unknown as Json,
-        alignment_report: report as unknown as Json,
-      });
+      // Save — pick the first dataset_id for the FK
+      const primaryDatasetId = selectedStreams[0]?.dataset_id;
+      if (primaryDatasetId) {
+        await supabase.from("analysis_runs").insert({
+          dataset_id: primaryDatasetId,
+          name: `Analysis ${new Date().toLocaleString()}`,
+          config: { epochMs, normalization, streamIds: selectedStreamIds, offsets: report.offsets, crossDataset: isCrossDataset } as unknown as Json,
+          status: "complete",
+          results: chartData as unknown as Json,
+          alignment_report: report as unknown as Json,
+        });
+        queryClient.invalidateQueries({ queryKey: ["analysis_runs"] });
+      }
 
       setStep(4);
       toast.success("Analysis complete");
@@ -320,31 +349,48 @@ const PipelinePage = () => {
           ))}
         </div>
 
-        {/* Step 1 */}
+        {/* Step 1: Cross-dataset stream selection */}
         {step === 1 && (
           <Card className="glass-panel p-5 space-y-4">
-            <h3 className="font-heading text-sm font-semibold">Step 1: Select Dataset & Streams</h3>
-            <div className="space-y-2">
-              <Label className="text-xs font-heading">Dataset</Label>
-              <Select value={selectedDatasetId} onValueChange={(v) => { setSelectedDatasetId(v); setSelectedStreamIds([]); }}>
-                <SelectTrigger className="h-9 text-sm"><SelectValue placeholder="Choose a dataset..." /></SelectTrigger>
-                <SelectContent>
-                  {datasets?.filter((d) => d.status === "complete").map((ds) => (
-                    <SelectItem key={ds.id} value={ds.id}>{ds.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+            <h3 className="font-heading text-sm font-semibold">Step 1: Select Streams (across all datasets)</h3>
+            <p className="text-[11px] text-muted-foreground">
+              You can pick streams from different datasets to combine modalities. Streams from different datasets will be marked.
+            </p>
 
-            {streams && streams.length > 0 && (
-              <div className="space-y-2">
-                <Label className="text-xs font-heading">Data Streams</Label>
-                <div className="space-y-1">
+            {/* Cross-dataset warning */}
+            {isCrossDataset && (
+              <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-500/10 border border-amber-500/30">
+                <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
+                <div className="text-xs">
+                  <p className="font-semibold text-amber-600">Cross-dataset selection detected</p>
+                  <p className="text-muted-foreground mt-0.5">
+                    You are combining streams from <strong>{selectedDatasetIds.size} different datasets</strong>. 
+                    Please verify that these recordings come from the same session/dyad and that their timelines can be meaningfully aligned. 
+                    Use the temporal alignment controls in Step 2 to set proper offsets.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {streamsByDataset.map(({ dataset, streams }) => (
+              <div key={dataset.id} className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <Database className="w-3.5 h-3.5 text-muted-foreground" />
+                  <span className="text-xs font-heading font-semibold">{dataset.name}</span>
+                  <Badge variant="outline" className="text-[9px]">
+                    {dataset.modalities?.join(", ")}
+                  </Badge>
+                </div>
+                <div className="space-y-1 ml-5">
                   {streams.map((s) => (
                     <div key={s.id} className="flex items-center gap-3 p-2 rounded-md bg-muted/30 hover:bg-muted/50">
                       <Checkbox
                         checked={selectedStreamIds.includes(s.id)}
                         onCheckedChange={() => toggleStream(s.id)}
+                      />
+                      <div
+                        className="w-2.5 h-2.5 rounded-full flex-shrink-0"
+                        style={{ backgroundColor: MODALITY_COLORS[s.modality] || "hsl(var(--accent))" }}
                       />
                       <div className="flex-1">
                         <span className="text-sm font-medium">{s.index_name}</span>
@@ -357,7 +403,7 @@ const PipelinePage = () => {
                   ))}
                 </div>
               </div>
-            )}
+            ))}
 
             <Button onClick={() => setStep(2)} disabled={selectedStreamIds.length === 0}>
               Next: Configure <ArrowRight className="w-4 h-4 ml-1" />
@@ -415,18 +461,26 @@ const PipelinePage = () => {
                 </Button>
               </div>
               <p className="text-[10px] text-muted-foreground">
-                Set per-stream time offsets to align recordings that started at different absolute times. 
-                Like synchronizing instruments in an orchestra — each may have started warming up at different moments, 
-                but the conductor's downbeat is the shared anchor.
+                Set per-stream time offsets to align recordings that started at different absolute times.
               </p>
 
+              {isCrossDataset && (
+                <div className="flex items-start gap-2 p-2 rounded-lg bg-amber-500/10 border border-amber-500/30">
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-500 mt-0.5 flex-shrink-0" />
+                  <p className="text-[10px] text-amber-600">
+                    Cross-dataset streams selected — temporal alignment is especially important. Use "Auto-Detect Anchors" or set manual offsets.
+                  </p>
+                </div>
+              )}
+
               {selectedStreamIds.map((id) => {
-                const stream = streams?.find((s) => s.id === id);
+                const stream = allStreams?.find((s) => s.id === id);
                 if (!stream) return null;
                 const offset = streamOffsets[id] || { offsetMs: 0, anchorMethod: "none" };
                 const rawData = (stream.data as StreamData[]) || [];
                 const tMin = rawData[0]?.t ?? 0;
                 const tMax = rawData[rawData.length - 1]?.t ?? 0;
+                const dsName = datasets?.find((d) => d.id === stream.dataset_id)?.name || "";
 
                 return (
                   <div key={id} className="flex items-center gap-3 p-2 rounded-md bg-muted/20">
@@ -438,6 +492,7 @@ const PipelinePage = () => {
                       <p className="text-[11px] font-medium truncate">{stream.index_name}</p>
                       <p className="text-[9px] text-muted-foreground font-mono">
                         {(tMin / 1000).toFixed(1)}s – {(tMax / 1000).toFixed(1)}s ({((tMax - tMin) / 1000).toFixed(1)}s)
+                        {dsName && <span className="ml-1 text-accent">· {dsName.slice(0, 30)}</span>}
                       </p>
                     </div>
                     <div className="flex items-center gap-2">
@@ -446,7 +501,7 @@ const PipelinePage = () => {
                           <Info className="w-3 h-3 text-muted-foreground" />
                         </TooltipTrigger>
                         <TooltipContent className="text-xs max-w-[200px]">
-                          Positive offset shifts this stream forward in time; negative shifts it backward. Use to align with a shared event (e.g., task onset, video start).
+                          Positive offset shifts this stream forward in time; negative shifts it backward.
                         </TooltipContent>
                       </Tooltip>
                       <Input
@@ -490,6 +545,9 @@ const PipelinePage = () => {
                     <div key={i} className="bg-muted/30 rounded-lg p-3 space-y-1">
                       <p className="text-xs font-heading font-semibold">{s.name}</p>
                       <Badge variant="outline" className="text-[10px] capitalize">{s.modality}</Badge>
+                      {s.datasetName && (
+                        <p className="text-[9px] text-accent truncate">{s.datasetName}</p>
+                      )}
                       <div className="text-[10px] text-muted-foreground space-y-0.5 mt-2">
                         <p>Raw: {s.rawSamples} samples @ {s.sampleRateHz}Hz</p>
                         <p>WCC: {s.wccWindows} windows ({s.nativeWindowMs}ms)</p>
@@ -508,6 +566,19 @@ const PipelinePage = () => {
                     </div>
                   ))}
                 </div>
+
+                {alignmentReport.crossDataset && (
+                  <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-500/10 border border-amber-500/30">
+                    <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
+                    <div className="text-xs">
+                      <p className="font-semibold text-amber-600">Cross-dataset analysis</p>
+                      <p className="text-muted-foreground">
+                        Streams from different datasets were combined. Results are valid only if they originate from the same recording session. 
+                        Check that time ranges overlap meaningfully.
+                      </p>
+                    </div>
+                  </div>
+                )}
 
                 <div className="bg-muted/30 rounded-lg p-3">
                   <div className="flex items-center gap-2 mb-2">
@@ -579,7 +650,6 @@ const PipelinePage = () => {
               </ResponsiveContainer>
             </Card>
 
-            {/* Alignment Quality Card */}
             {alignmentReport && (
               <Card className="glass-panel p-4 space-y-3">
                 <div className="flex items-center gap-2">
@@ -588,21 +658,19 @@ const PipelinePage = () => {
                 </div>
                 <div className="text-xs text-muted-foreground space-y-1">
                   <p>
-                    <strong>How alignment works:</strong> Each stream computes synchrony (WCC) at its native temporal resolution, 
-                    then the resulting synchrony timeseries is epoch-aggregated to the common resolution ({epochMs / 1000}s). 
-                    Like a concert where each instrument plays at its own tempo, but the conductor 
-                    (epoch aggregation) ensures all parts align on shared beat boundaries.
+                    <strong>How alignment works:</strong> Each stream computes synchrony (WCC) at its native temporal resolution,
+                    then the resulting synchrony timeseries is epoch-aggregated to the common resolution ({epochMs / 1000}s).
                   </p>
-                  {alignmentReport.streams?.some((s: any) => s.offsetApplied !== 0) && (
-                    <p>
-                      <strong>Temporal offsets applied:</strong> Streams were shifted to align their recording start times. 
-                      This corrects for equipment startup delays, different trigger signals, or manual recording offsets.
+                  {alignmentReport.crossDataset && (
+                    <p className="text-amber-600">
+                      <strong>⚠ Cross-dataset:</strong> Streams were pulled from different datasets. Verify they represent the same experimental session.
                     </p>
                   )}
-                  <p className="text-[10px]">
-                    <strong>Tip:</strong> If alignment looks wrong, go back to Step 2 and adjust per-stream offsets manually, 
-                    or re-import data with corrected time columns in the Import Portal.
-                  </p>
+                  {alignmentReport.streams?.some((s: any) => s.offsetApplied !== 0) && (
+                    <p>
+                      <strong>Temporal offsets applied:</strong> Streams were shifted to align their recording start times.
+                    </p>
+                  )}
                 </div>
               </Card>
             )}

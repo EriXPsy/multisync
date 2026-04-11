@@ -48,6 +48,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { DEFAULT_WCC_PARAMS } from "@/lib/synchrony-data";
+import { runCascadeAnalysis } from "@/lib/cascade-analysis";
 import type { Json } from "@/integrations/supabase/types";
 
 const STEPS = [
@@ -288,12 +289,16 @@ const PipelinePage = () => {
         return point;
       });
 
+      // Run cascade analysis
+      const cascadeReport = runCascadeAnalysis(modalityResults, epochMs);
+
       report.alignment = {
         commonEpochMs: epochMs,
         totalEpochs: maxEpochs,
         modalities: Object.keys(modalityResults),
         normalization,
       };
+      report.cascade = cascadeReport;
 
       setAlignmentReport(report);
       setAnalysisResults(chartData);

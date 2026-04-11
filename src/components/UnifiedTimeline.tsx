@@ -22,9 +22,10 @@ import {
 } from "@/components/ui/select";
 import { supabase } from "@/integrations/supabase/client";
 import { useQuery } from "@tanstack/react-query";
-import { Brain, Eye, Heart, Users, Info, AlertTriangle, BarChart3 } from "lucide-react";
+import { Brain, Eye, Heart, Users, Info, AlertTriangle, BarChart3, ArrowRight, TrendingUp, Zap, GitBranch } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
+import type { CascadeReport, OnsetResult, LeadLagResult, GrangerResult } from "@/lib/cascade-analysis";
 
 const MODALITY_ICONS: Record<string, any> = {
   neural: Brain,
@@ -38,6 +39,13 @@ const MODALITY_COLORS: Record<string, string> = {
   behavioral: "hsl(185, 55%, 40%)",
   bio: "hsl(340, 60%, 55%)",
   psycho: "hsl(35, 80%, 55%)",
+};
+
+const MODALITY_LABELS: Record<string, string> = {
+  neural: "Neural",
+  behavioral: "Behavioral",
+  bio: "Bio",
+  psycho: "Psycho",
 };
 
 export function UnifiedTimeline() {
@@ -61,7 +69,7 @@ export function UnifiedTimeline() {
   const selectedRun = useMemo(() => {
     if (!analysisRuns || analysisRuns.length === 0) return null;
     if (selectedRunId) return analysisRuns.find((r) => r.id === selectedRunId) || null;
-    return analysisRuns[0]; // default to latest
+    return analysisRuns[0];
   }, [analysisRuns, selectedRunId]);
 
   const chartData = useMemo(() => {
@@ -74,12 +82,15 @@ export function UnifiedTimeline() {
     return selectedRun.alignment_report as any;
   }, [selectedRun]);
 
+  const cascade: CascadeReport | null = useMemo(() => {
+    return report?.cascade || null;
+  }, [report]);
+
   const modalities = useMemo(() => {
     if (!chartData || chartData.length === 0) return [];
-    const keys = Object.keys(chartData[0]).filter(
+    return Object.keys(chartData[0]).filter(
       (k) => !["epoch", "time", "timeMs"].includes(k) && !k.endsWith("_conf")
     );
-    return keys;
   }, [chartData]);
 
   const config = useMemo(() => {
@@ -130,7 +141,7 @@ export function UnifiedTimeline() {
           Unified Multimodal Timeline
         </h2>
         <p className="text-sm text-muted-foreground mt-1">
-          Showing real analysis results — epoch-aggregated synchrony from the pipeline.
+          Epoch-aggregated synchrony with cascade detection and lead-lag analysis.
         </p>
       </div>
 
@@ -139,10 +150,7 @@ export function UnifiedTimeline() {
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div className="space-y-2">
             <Label className="text-xs font-heading font-medium">Analysis Run</Label>
-            <Select
-              value={selectedRun?.id || ""}
-              onValueChange={(v) => setSelectedRunId(v)}
-            >
+            <Select value={selectedRun?.id || ""} onValueChange={(v) => setSelectedRunId(v)}>
               <SelectTrigger className="h-8 text-xs">
                 <SelectValue placeholder="Select an analysis run..." />
               </SelectTrigger>
@@ -166,7 +174,46 @@ export function UnifiedTimeline() {
         </div>
       </Card>
 
-      {/* Stream Info from alignment report */}
+      {/* Cascade Summary Banner */}
+      {cascade && cascade.cascadeOrder.length > 0 && (
+        <Card className="glass-panel p-4 border-accent/30 bg-accent/5">
+          <div className="flex items-start gap-3">
+            <Zap className="w-5 h-5 text-accent mt-0.5 flex-shrink-0" />
+            <div className="space-y-2 flex-1">
+              <h3 className="font-heading text-sm font-bold">Synchrony Cascade Detected</h3>
+              
+              {/* Cascade order visualization */}
+              <div className="flex items-center gap-2 flex-wrap">
+                {cascade.cascadeOrder.map((mod, i) => {
+                  const Icon = MODALITY_ICONS[mod] || Info;
+                  const onset = cascade.onsets.find((o: OnsetResult) => o.modality === mod);
+                  return (
+                    <div key={mod} className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-background border" style={{ borderColor: MODALITY_COLORS[mod] }}>
+                        <Icon className="w-3.5 h-3.5" style={{ color: MODALITY_COLORS[mod] }} />
+                        <span className="text-xs font-semibold capitalize">{mod}</span>
+                        {onset?.onsetTimeSec != null && (
+                          <Badge variant="secondary" className="text-[9px] ml-1">{onset.onsetTimeSec.toFixed(0)}s</Badge>
+                        )}
+                        {onset?.onsetTimeSec == null && (
+                          <Badge variant="outline" className="text-[9px] ml-1 text-muted-foreground">—</Badge>
+                        )}
+                      </div>
+                      {i < cascade.cascadeOrder.length - 1 && (
+                        <ArrowRight className="w-3.5 h-3.5 text-accent" />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <p className="text-xs text-muted-foreground leading-relaxed">{cascade.summary}</p>
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {/* Stream Info */}
       {report?.streams && report.streams.length > 0 && (
         <Card className="glass-panel p-4">
           <div className="flex items-center gap-2 mb-3">
@@ -228,12 +275,31 @@ export function UnifiedTimeline() {
             <Legend wrapperStyle={{ fontSize: 11 }} />
             <ReferenceLine y={0} stroke="hsl(var(--border))" strokeDasharray="2 2" />
 
+            {/* Onset markers */}
+            {cascade?.onsets
+              .filter((o: OnsetResult) => o.onsetEpoch != null)
+              .map((o: OnsetResult) => (
+                <ReferenceLine
+                  key={`onset-${o.modality}`}
+                  x={chartData[o.onsetEpoch!]?.time}
+                  stroke={MODALITY_COLORS[o.modality] || "hsl(var(--accent))"}
+                  strokeDasharray="4 2"
+                  strokeWidth={1.5}
+                  label={{
+                    value: `${(MODALITY_LABELS[o.modality] || o.modality)} onset`,
+                    position: "top",
+                    fontSize: 9,
+                    fill: MODALITY_COLORS[o.modality],
+                  }}
+                />
+              ))}
+
             {modalities.map((mod) => (
               <Line
                 key={mod}
                 type="monotone"
                 dataKey={mod}
-                name={`${mod.charAt(0).toUpperCase() + mod.slice(1)} Sync`}
+                name={`${(MODALITY_LABELS[mod] || mod)} Sync`}
                 stroke={MODALITY_COLORS[mod] || "hsl(var(--accent))"}
                 strokeWidth={2}
                 dot={false}
@@ -245,7 +311,117 @@ export function UnifiedTimeline() {
         </ResponsiveContainer>
       </Card>
 
-      {/* Modality Summary Cards */}
+      {/* Lead-Lag Matrix */}
+      {cascade && cascade.leadLagMatrix.length > 0 && (
+        <Card className="glass-panel p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <TrendingUp className="w-4 h-4 text-accent" />
+            <h3 className="font-heading text-sm font-semibold">Lead-Lag Cross-Correlation</h3>
+          </div>
+          <p className="text-[10px] text-muted-foreground">
+            Pairwise temporal relationships between modality synchrony timeseries (Boker et al., 2002).
+          </p>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-border">
+                  <th className="text-left py-2 px-3 font-heading">Leader</th>
+                  <th className="text-left py-2 px-3 font-heading">Follower</th>
+                  <th className="text-center py-2 px-3 font-heading">Lag</th>
+                  <th className="text-center py-2 px-3 font-heading">r</th>
+                </tr>
+              </thead>
+              <tbody>
+                {cascade.leadLagMatrix.map((ll: LeadLagResult, i: number) => (
+                  <tr key={i} className="border-b border-border/50">
+                    <td className="py-2 px-3">
+                      <div className="flex items-center gap-1.5">
+                        <div className="w-2 h-2 rounded-full" style={{ backgroundColor: MODALITY_COLORS[ll.from] }} />
+                        <span className="capitalize font-medium">{ll.from}</span>
+                      </div>
+                    </td>
+                    <td className="py-2 px-3">
+                      <div className="flex items-center gap-1.5">
+                        <ArrowRight className="w-3 h-3 text-muted-foreground" />
+                        <div className="w-2 h-2 rounded-full" style={{ backgroundColor: MODALITY_COLORS[ll.to] }} />
+                        <span className="capitalize">{ll.to}</span>
+                      </div>
+                    </td>
+                    <td className="py-2 px-3 text-center font-mono">
+                      {ll.optimalLagSec}s
+                      <span className="text-muted-foreground ml-1">({ll.optimalLagEpochs} ep)</span>
+                    </td>
+                    <td className="py-2 px-3 text-center font-mono">
+                      <Badge variant={ll.peakCorrelation > 0.5 ? "default" : "secondary"} className="text-[10px]">
+                        {ll.peakCorrelation.toFixed(3)}
+                      </Badge>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {/* Granger Causality */}
+      {cascade && cascade.grangerResults.length > 0 && (
+        <Card className="glass-panel p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <GitBranch className="w-4 h-4 text-accent" />
+            <h3 className="font-heading text-sm font-semibold">Directional Influence (Granger Causality)</h3>
+          </div>
+          <p className="text-[10px] text-muted-foreground">
+            Tests whether past values of one modality's synchrony improve prediction of another (Granger, 1969; Quan et al., 2025). 
+            Variance ratio &gt; 1 and F &gt; 2 suggest directional influence.
+          </p>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-border">
+                  <th className="text-left py-2 px-3 font-heading">Cause</th>
+                  <th className="text-left py-2 px-3 font-heading">Effect</th>
+                  <th className="text-center py-2 px-3 font-heading">F-stat</th>
+                  <th className="text-center py-2 px-3 font-heading">Var Ratio</th>
+                  <th className="text-center py-2 px-3 font-heading">Result</th>
+                </tr>
+              </thead>
+              <tbody>
+                {cascade.grangerResults
+                  .sort((a: GrangerResult, b: GrangerResult) => b.fStatistic - a.fStatistic)
+                  .map((g: GrangerResult, i: number) => (
+                    <tr key={i} className="border-b border-border/50">
+                      <td className="py-2 px-3">
+                        <div className="flex items-center gap-1.5">
+                          <div className="w-2 h-2 rounded-full" style={{ backgroundColor: MODALITY_COLORS[g.cause] }} />
+                          <span className="capitalize font-medium">{g.cause}</span>
+                        </div>
+                      </td>
+                      <td className="py-2 px-3">
+                        <div className="flex items-center gap-1.5">
+                          <ArrowRight className="w-3 h-3 text-muted-foreground" />
+                          <div className="w-2 h-2 rounded-full" style={{ backgroundColor: MODALITY_COLORS[g.effect] }} />
+                          <span className="capitalize">{g.effect}</span>
+                        </div>
+                      </td>
+                      <td className="py-2 px-3 text-center font-mono">{g.fStatistic.toFixed(2)}</td>
+                      <td className="py-2 px-3 text-center font-mono">{g.varianceRatio.toFixed(3)}</td>
+                      <td className="py-2 px-3 text-center">
+                        {g.direction === "causes" ? (
+                          <Badge className="text-[10px] bg-accent/20 text-accent border-accent/30">Causes</Badge>
+                        ) : (
+                          <Badge variant="outline" className="text-[10px] text-muted-foreground">No effect</Badge>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {/* Modality Summary Cards with onset info */}
       {modalities.length > 0 && (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           {modalities.map((mod) => {
@@ -255,6 +431,7 @@ export function UnifiedTimeline() {
             const peak = Math.max(...values);
             const mean = values.reduce((a, b) => a + b, 0) / values.length;
             const streamInfo = report?.streams?.find((s: any) => s.modality === mod);
+            const onset = cascade?.onsets?.find((o: OnsetResult) => o.modality === mod);
 
             return (
               <Card key={mod} className="glass-panel p-4 space-y-3">
@@ -263,8 +440,11 @@ export function UnifiedTimeline() {
                     <Icon className="w-4 h-4" style={{ color: MODALITY_COLORS[mod] }} />
                     <span className="font-heading text-sm font-semibold capitalize">{mod}</span>
                   </div>
+                  {onset?.onsetTimeSec != null && cascade?.cascadeOrder?.[0] === mod && (
+                    <Badge className="text-[9px] bg-accent/20 text-accent">Leader</Badge>
+                  )}
                 </div>
-                <div className="grid grid-cols-2 gap-2 text-xs font-body">
+                <div className="grid grid-cols-3 gap-2 text-xs font-body">
                   <div>
                     <p className="text-muted-foreground">Peak</p>
                     <p className="font-semibold">{peak.toFixed(3)}</p>
@@ -272,6 +452,12 @@ export function UnifiedTimeline() {
                   <div>
                     <p className="text-muted-foreground">Mean</p>
                     <p className="font-semibold">{mean.toFixed(3)}</p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground">Onset</p>
+                    <p className="font-semibold">
+                      {onset?.onsetTimeSec != null ? `${onset.onsetTimeSec.toFixed(0)}s` : "—"}
+                    </p>
                   </div>
                 </div>
                 {streamInfo && (

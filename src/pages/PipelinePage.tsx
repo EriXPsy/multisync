@@ -289,12 +289,16 @@ const PipelinePage = () => {
         return point;
       });
 
+      // Run cascade analysis
+      const cascadeReport = runCascadeAnalysis(modalityResults, epochMs);
+
       report.alignment = {
         commonEpochMs: epochMs,
         totalEpochs: maxEpochs,
         modalities: Object.keys(modalityResults),
         normalization,
       };
+      report.cascade = cascadeReport;
 
       setAlignmentReport(report);
       setAnalysisResults(chartData);

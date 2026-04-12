@@ -250,6 +250,18 @@ const ImportPage = () => {
           p2: Number(row[stream.person2Col]) || 0,
         }));
 
+        // Validate data before importing
+        const validation = validateDyadicData(timeseriesData, stream.sampleRateHz);
+        if (!validation.valid) {
+          const errors = validation.warnings.filter(w => w.severity === "error").map(w => w.message).join("; ");
+          toast.error(`Validation failed for "${stream.indexName || stream.file.name}": ${errors}`);
+          continue;
+        }
+        if (validation.warnings.length > 0) {
+          const warnMsgs = validation.warnings.filter(w => w.severity === "warning").map(w => w.message);
+          warnMsgs.forEach(msg => toast.warning(`${stream.file.name}: ${msg}`));
+        }
+
         const { error } = await supabase.from("data_streams").insert({
           dataset_id: dataset.id,
           modality: stream.modality,
@@ -266,6 +278,7 @@ const ImportPage = () => {
             timeOffsetMs: stream.timeOffsetMs,
             timeUnit: stream.timeUnit,
             detectionConfidence: stream.detection.confidence,
+            validation: validation.stats,
           },
         });
         if (error) throw error;

@@ -49,6 +49,8 @@ import {
 import { toast } from "sonner";
 import { DEFAULT_WCC_PARAMS } from "@/lib/synchrony-data";
 import { runCascadeAnalysis } from "@/lib/cascade-analysis";
+import { computeWCC, normalize, epochAggregate, type StreamData, type NormalizationMethod } from "@/lib/wcc-compute";
+import { runSurrogateTestBatch, type SurrogateResult } from "@/lib/surrogate-testing";
 import type { Json } from "@/integrations/supabase/types";
 
 const STEPS = [
@@ -65,53 +67,7 @@ const MODALITY_COLORS: Record<string, string> = {
   psycho: "hsl(35, 80%, 55%)",
 };
 
-type StreamData = { t: number; p1: number; p2: number };
-
-function computeWCC(data: StreamData[], windowMs: number, lagMs: number, sampleRateHz: number): number[] {
-  const windowSamples = Math.max(1, Math.round((windowMs / 1000) * sampleRateHz));
-  const results: number[] = [];
-  for (let i = 0; i < data.length - windowSamples; i += Math.max(1, Math.floor(windowSamples / 2))) {
-    const w1 = data.slice(i, i + windowSamples).map((d) => d.p1);
-    const w2 = data.slice(i, i + windowSamples).map((d) => d.p2);
-    const m1 = w1.reduce((a, b) => a + b, 0) / w1.length;
-    const m2 = w2.reduce((a, b) => a + b, 0) / w2.length;
-    const s1 = Math.sqrt(w1.reduce((a, b) => a + (b - m1) ** 2, 0) / w1.length);
-    const s2 = Math.sqrt(w2.reduce((a, b) => a + (b - m2) ** 2, 0) / w2.length);
-    if (s1 === 0 || s2 === 0) { results.push(0); continue; }
-    let maxCorr = 0;
-    const lagSamples = Math.round((lagMs / 1000) * sampleRateHz);
-    for (let lag = -lagSamples; lag <= lagSamples; lag++) {
-      let sum = 0, count = 0;
-      for (let j = 0; j < windowSamples; j++) {
-        const j2 = j + lag;
-        if (j2 >= 0 && j2 < windowSamples) {
-          sum += ((w1[j] - m1) / s1) * ((w2[j2] - m2) / s2);
-          count++;
-        }
-      }
-      const corr = count > 0 ? sum / count : 0;
-      if (Math.abs(corr) > Math.abs(maxCorr)) maxCorr = corr;
-    }
-    results.push(maxCorr);
-  }
-  return results;
-}
-
-function zScore(values: number[]): number[] {
-  const mean = values.reduce((a, b) => a + b, 0) / values.length;
-  const std = Math.sqrt(values.reduce((a, b) => a + (b - mean) ** 2, 0) / values.length);
-  if (std === 0) return values.map(() => 0);
-  return values.map((v) => (v - mean) / std);
-}
-
-function epochAggregate(values: number[], epochSamples: number): number[] {
-  const result: number[] = [];
-  for (let i = 0; i < values.length; i += epochSamples) {
-    const chunk = values.slice(i, i + epochSamples);
-    result.push(chunk.reduce((a, b) => a + b, 0) / chunk.length);
-  }
-  return result;
-}
+// StreamData type and computation functions imported from @/lib/wcc-compute
 
 type StreamOffset = { streamId: string; offsetMs: number; anchorMethod: "none" | "first_nonzero" | "manual" };
 
@@ -120,7 +76,8 @@ const PipelinePage = () => {
   const [step, setStep] = useState(1);
   const [selectedStreamIds, setSelectedStreamIds] = useState<string[]>([]);
   const [epochMs, setEpochMs] = useState(10000);
-  const [normalization, setNormalization] = useState<"zscore" | "minmax">("zscore");
+  const [normalization, setNormalization] = useState<NormalizationMethod>("zscore");
+  const [baselineMs, setBaselineMs] = useState(60000); // 60s default baseline
   const [streamOffsets, setStreamOffsets] = useState<Record<string, StreamOffset>>({});
   const [analysisResults, setAnalysisResults] = useState<any>(null);
   const [alignmentReport, setAlignmentReport] = useState<any>(null);
@@ -244,10 +201,11 @@ const PipelinePage = () => {
         const windowMs = 5000;
         const lagMs = 2000;
 
-        const wccValues = computeWCC(rawData, windowMs, lagMs, sampleRate);
-        const zScored = zScore(wccValues);
-        const samplesPerEpoch = Math.max(1, Math.round((epochMs / 1000) * (wccValues.length / (rawData.length / sampleRate))));
-        const epoched = epochAggregate(zScored, Math.max(1, samplesPerEpoch));
+        const wccValues = computeWCC(rawData, windowMs, lagMs, sampleRate, true);
+        const wccWindowsPerSec = wccValues.length / (rawData.length / sampleRate);
+        const normalized = normalize(wccValues, { method: normalization, baselineEndMs: baselineMs }, wccWindowsPerSec);
+        const samplesPerEpoch = Math.max(1, Math.round((epochMs / 1000) * wccWindowsPerSec));
+        const epoched = epochAggregate(normalized, Math.max(1, samplesPerEpoch));
 
         modalityResults[stream.modality] = modalityResults[stream.modality] || [];
         if (modalityResults[stream.modality].length === 0) {
@@ -292,6 +250,25 @@ const PipelinePage = () => {
       // Run cascade analysis
       const cascadeReport = runCascadeAnalysis(modalityResults, epochMs);
 
+      // Run surrogate testing (reduced count for browser performance)
+      const surrogateStreams = selectedStreams
+        .filter(s => {
+          const rawData = (s.data as StreamData[]) || [];
+          return rawData.length > 0;
+        })
+        .map(s => {
+          let rawData = (s.data as StreamData[]) || [];
+          const offset = streamOffsets[s.id]?.offsetMs || 0;
+          if (offset !== 0) rawData = rawData.map(d => ({ ...d, t: d.t + offset }));
+          return {
+            data: rawData,
+            name: s.index_name,
+            modality: s.modality,
+            sampleRateHz: s.sample_rate_hz || 30,
+          };
+        });
+      const surrogateResults = runSurrogateTestBatch(surrogateStreams, 5000, 2000, 100);
+
       report.alignment = {
         commonEpochMs: epochMs,
         totalEpochs: maxEpochs,
@@ -299,6 +276,7 @@ const PipelinePage = () => {
         normalization,
       };
       report.cascade = cascadeReport;
+      report.surrogates = surrogateResults;
 
       setAlignmentReport(report);
       setAnalysisResults(chartData);
@@ -438,16 +416,61 @@ const PipelinePage = () => {
                 <p className="text-[10px] text-muted-foreground">
                   All streams epoch-aggregated to this resolution after WCC at native rates.
                 </p>
+                {epochMs >= 10000 && (
+                  <div className="flex items-start gap-1.5 p-2 rounded-md bg-amber-500/10 border border-amber-500/20 mt-1">
+                    <AlertTriangle className="w-3 h-3 text-amber-500 mt-0.5 flex-shrink-0" />
+                    <p className="text-[9px] text-amber-600">
+                      Large epochs ({epochMs / 1000}s) smooth away fast temporal dynamics. 
+                      Neural cascades happening within seconds will be invisible. 
+                      Cascade detection is limited to the epoch timescale — consider 1-5s for finer resolution (more epochs = more statistical power for Granger tests).
+                    </p>
+                  </div>
+                )}
+                {epochMs <= 2000 && (
+                  <div className="flex items-start gap-1.5 p-2 rounded-md bg-blue-500/10 border border-blue-500/20 mt-1">
+                    <Info className="w-3 h-3 text-blue-500 mt-0.5 flex-shrink-0" />
+                    <p className="text-[9px] text-blue-600">
+                      Fine epochs ({epochMs / 1000}s) preserve temporal detail but may be noisy for slow modalities (bio, psycho). 
+                      Consider whether your slowest stream has meaningful variation at this timescale.
+                    </p>
+                  </div>
+                )}
               </div>
               <div className="space-y-2">
                 <Label className="text-xs font-heading">Normalization</Label>
-                <Select value={normalization} onValueChange={(v) => setNormalization(v as any)}>
+                <Select value={normalization} onValueChange={(v) => setNormalization(v as NormalizationMethod)}>
                   <SelectTrigger className="h-9 text-sm"><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="zscore">Z-Score (recommended)</SelectItem>
+                    <SelectItem value="zscore">Z-Score — session-global (default)</SelectItem>
+                    <SelectItem value="zscore_baseline">Z-Score — baseline period</SelectItem>
                     <SelectItem value="minmax">Min-Max [0,1]</SelectItem>
                   </SelectContent>
                 </Select>
+                {normalization === "zscore_baseline" && (
+                  <div className="space-y-1 mt-2 p-2 rounded-md bg-muted/30">
+                    <Label className="text-[10px] font-heading">Baseline period (seconds)</Label>
+                    <div className="flex items-center gap-3">
+                      <Slider
+                        value={[baselineMs / 1000]}
+                        onValueChange={([v]) => setBaselineMs(v * 1000)}
+                        min={10}
+                        max={300}
+                        step={10}
+                        className="flex-1"
+                      />
+                      <Badge variant="secondary" className="min-w-[50px] text-center">{baselineMs / 1000}s</Badge>
+                    </div>
+                    <p className="text-[9px] text-muted-foreground">
+                      Z-scores computed using mean &amp; SD from the first {baselineMs / 1000}s only. 
+                      Values outside this baseline can exceed ±1, reflecting genuine synchrony above resting levels.
+                    </p>
+                  </div>
+                )}
+                <p className="text-[9px] text-muted-foreground">
+                  {normalization === "zscore" && "Standardizes using session-wide mean/SD. Simple but may dilute strong synchrony periods."}
+                  {normalization === "zscore_baseline" && "Standardizes against a resting baseline — preserves genuine high-synchrony signal."}
+                  {normalization === "minmax" && "Rescales to [0,1]. Sensitive to outliers; not recommended for cascade detection."}
+                </p>
               </div>
             </div>
 

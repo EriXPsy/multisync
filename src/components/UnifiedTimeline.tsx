@@ -22,10 +22,11 @@ import {
 } from "@/components/ui/select";
 import { supabase } from "@/integrations/supabase/client";
 import { useQuery } from "@tanstack/react-query";
-import { Brain, Eye, Heart, Users, Info, AlertTriangle, BarChart3, ArrowRight, TrendingUp, Zap, GitBranch } from "lucide-react";
+import { Brain, Eye, Heart, Users, Info, AlertTriangle, BarChart3, ArrowRight, TrendingUp, Zap, GitBranch, ShieldCheck } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import type { CascadeReport, OnsetResult, LeadLagResult, GrangerResult } from "@/lib/cascade-analysis";
+import type { CascadeReport, OnsetResult, LeadLagResult, GrangerResult, SensitivityResult } from "@/lib/cascade-analysis";
+import type { SurrogateResult } from "@/lib/surrogate-testing";
 
 const MODALITY_ICONS: Record<string, any> = {
   neural: Brain,
@@ -84,6 +85,10 @@ export function UnifiedTimeline() {
 
   const cascade: CascadeReport | null = useMemo(() => {
     return report?.cascade || null;
+  }, [report]);
+
+  const surrogates: SurrogateResult[] = useMemo(() => {
+    return (report?.surrogates as SurrogateResult[]) || [];
   }, [report]);
 
   const modalities = useMemo(() => {
@@ -208,6 +213,18 @@ export function UnifiedTimeline() {
               </div>
 
               <p className="text-xs text-muted-foreground leading-relaxed">{cascade.summary}</p>
+
+              {/* Warnings */}
+              {cascade.warnings && cascade.warnings.length > 0 && (
+                <div className="space-y-1 mt-2">
+                  {cascade.warnings.map((w: string, i: number) => (
+                    <div key={i} className="flex items-start gap-1.5 text-[10px] text-amber-600">
+                      <AlertTriangle className="w-3 h-3 mt-0.5 flex-shrink-0" />
+                      <span>{w}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </Card>
@@ -371,52 +388,243 @@ export function UnifiedTimeline() {
             <GitBranch className="w-4 h-4 text-accent" />
             <h3 className="font-heading text-sm font-semibold">Directional Influence (Granger Causality)</h3>
           </div>
+           <p className="text-[10px] text-muted-foreground">
+             Tests whether past values of one modality's synchrony improve prediction of another (Granger, 1969). 
+             P-values are Bonferroni-corrected for {cascade.grangerResults.length} comparisons. η² = partial eta-squared effect size.
+           </p>
+           <div className="overflow-x-auto">
+             <table className="w-full text-xs">
+               <thead>
+                 <tr className="border-b border-border">
+                   <th className="text-left py-2 px-3 font-heading">Cause</th>
+                   <th className="text-left py-2 px-3 font-heading">Effect</th>
+                   <th className="text-center py-2 px-3 font-heading">F</th>
+                   <th className="text-center py-2 px-3 font-heading">p (corr)</th>
+                   <th className="text-center py-2 px-3 font-heading">η²</th>
+                   <th className="text-center py-2 px-3 font-heading">Result</th>
+                 </tr>
+               </thead>
+               <tbody>
+                 {cascade.grangerResults
+                   .sort((a: GrangerResult, b: GrangerResult) => b.fStatistic - a.fStatistic)
+                   .map((g: GrangerResult, i: number) => (
+                     <tr key={i} className="border-b border-border/50">
+                       <td className="py-2 px-3">
+                         <div className="flex items-center gap-1.5">
+                           <div className="w-2 h-2 rounded-full" style={{ backgroundColor: MODALITY_COLORS[g.cause] }} />
+                           <span className="capitalize font-medium">{g.cause}</span>
+                         </div>
+                       </td>
+                       <td className="py-2 px-3">
+                         <div className="flex items-center gap-1.5">
+                           <ArrowRight className="w-3 h-3 text-muted-foreground" />
+                           <div className="w-2 h-2 rounded-full" style={{ backgroundColor: MODALITY_COLORS[g.effect] }} />
+                           <span className="capitalize">{g.effect}</span>
+                         </div>
+                       </td>
+                       <td className="py-2 px-3 text-center font-mono">{g.fStatistic.toFixed(2)}</td>
+                       <td className="py-2 px-3 text-center font-mono">
+                         {g.pValueCorrected != null ? (
+                           <span className={g.pValueCorrected < 0.05 ? "text-accent font-semibold" : ""}>
+                             {g.pValueCorrected < 0.001 ? "<.001" : g.pValueCorrected.toFixed(3)}
+                           </span>
+                         ) : "—"}
+                       </td>
+                       <td className="py-2 px-3 text-center font-mono">
+                         {g.effectSize != null ? g.effectSize.toFixed(3) : "—"}
+                       </td>
+                       <td className="py-2 px-3 text-center">
+                         <div className="flex items-center justify-center gap-1">
+                           {g.direction === "causes" ? (
+                             <Badge className="text-[10px] bg-accent/20 text-accent border-accent/30">Causes</Badge>
+                           ) : (
+                             <Badge variant="outline" className="text-[10px] text-muted-foreground">No effect</Badge>
+                           )}
+                           {g.underpowered && (
+                             <Badge variant="outline" className="text-[9px] text-amber-500 border-amber-500/30">Low n</Badge>
+                           )}
+                         </div>
+                       </td>
+                     </tr>
+                   ))}
+               </tbody>
+             </table>
+           </div>
+         </Card>
+       )}
+
+       {/* Onset Sensitivity Analysis */}
+       {cascade && cascade.sensitivityAnalysis && cascade.sensitivityAnalysis.length > 0 && (
+         <Card className="glass-panel p-4 space-y-3">
+           <div className="flex items-center gap-2">
+             <TrendingUp className="w-4 h-4 text-accent" />
+             <h3 className="font-heading text-sm font-semibold">Onset Threshold Sensitivity</h3>
+             {cascade.cascadeStability != null && (
+               <Badge variant={cascade.cascadeStability >= 0.7 ? "default" : "secondary"} className="text-[10px]">
+                 Stability: {(cascade.cascadeStability * 100).toFixed(0)}%
+               </Badge>
+             )}
+           </div>
+           <p className="text-[10px] text-muted-foreground">
+             Cascade order at different onset thresholds (0.25σ–1.5σ). High stability means the leading modality is robust to threshold choice.
+           </p>
+           <div className="overflow-x-auto">
+             <table className="w-full text-xs">
+               <thead>
+                 <tr className="border-b border-border">
+                   <th className="text-left py-2 px-3 font-heading">Threshold</th>
+                   <th className="text-left py-2 px-3 font-heading">Cascade Order</th>
+                 </tr>
+               </thead>
+               <tbody>
+                 {cascade.sensitivityAnalysis.map((s: SensitivityResult, i: number) => (
+                   <tr key={i} className={`border-b border-border/50 ${s.threshold === cascade.thresholdSigma ? "bg-accent/5" : ""}`}>
+                     <td className="py-2 px-3 font-mono">
+                       {s.threshold.toFixed(2)}σ
+                       {s.threshold === cascade.thresholdSigma && (
+                         <span className="text-accent ml-1">←</span>
+                       )}
+                     </td>
+                     <td className="py-2 px-3">
+                       <div className="flex items-center gap-1 flex-wrap">
+                         {s.cascadeOrder.map((mod, j) => (
+                           <span key={j} className="flex items-center gap-0.5">
+                             {j > 0 && <ArrowRight className="w-2.5 h-2.5 text-muted-foreground" />}
+                             <span className="capitalize" style={{ color: MODALITY_COLORS[mod] || "inherit" }}>{mod}</span>
+                           </span>
+                         ))}
+                         {s.cascadeOrder.length === 0 && (
+                           <span className="text-muted-foreground italic">No modality crossed threshold</span>
+                         )}
+                       </div>
+                     </td>
+                   </tr>
+                 ))}
+               </tbody>
+             </table>
+           </div>
+         </Card>
+       )}
+
+      {/* Surrogate Testing Results */}
+      {surrogates.length > 0 && (
+        <Card className="glass-panel p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <ShieldCheck className="w-4 h-4 text-accent" />
+            <h3 className="font-heading text-sm font-semibold">Surrogate Significance Testing</h3>
+          </div>
           <p className="text-[10px] text-muted-foreground">
-            Tests whether past values of one modality's synchrony improve prediction of another (Granger, 1969; Quan et al., 2025). 
-            Variance ratio &gt; 1 and F &gt; 2 suggest directional influence.
+            Observed synchrony compared against {surrogates[0]?.nSurrogates || 100} pseudo-pair surrogates (Moulder et al., 2018). 
+            Significant results (p &lt; .05) indicate synchrony exceeds chance levels.
           </p>
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead>
                 <tr className="border-b border-border">
-                  <th className="text-left py-2 px-3 font-heading">Cause</th>
-                  <th className="text-left py-2 px-3 font-heading">Effect</th>
-                  <th className="text-center py-2 px-3 font-heading">F-stat</th>
-                  <th className="text-center py-2 px-3 font-heading">Var Ratio</th>
+                  <th className="text-left py-2 px-3 font-heading">Stream</th>
+                  <th className="text-center py-2 px-3 font-heading">Observed</th>
+                  <th className="text-center py-2 px-3 font-heading">Surrogate μ±σ</th>
+                  <th className="text-center py-2 px-3 font-heading">Percentile</th>
+                  <th className="text-center py-2 px-3 font-heading">p</th>
                   <th className="text-center py-2 px-3 font-heading">Result</th>
                 </tr>
               </thead>
               <tbody>
-                {cascade.grangerResults
-                  .sort((a: GrangerResult, b: GrangerResult) => b.fStatistic - a.fStatistic)
-                  .map((g: GrangerResult, i: number) => (
-                    <tr key={i} className="border-b border-border/50">
-                      <td className="py-2 px-3">
-                        <div className="flex items-center gap-1.5">
-                          <div className="w-2 h-2 rounded-full" style={{ backgroundColor: MODALITY_COLORS[g.cause] }} />
-                          <span className="capitalize font-medium">{g.cause}</span>
-                        </div>
-                      </td>
-                      <td className="py-2 px-3">
-                        <div className="flex items-center gap-1.5">
-                          <ArrowRight className="w-3 h-3 text-muted-foreground" />
-                          <div className="w-2 h-2 rounded-full" style={{ backgroundColor: MODALITY_COLORS[g.effect] }} />
-                          <span className="capitalize">{g.effect}</span>
-                        </div>
-                      </td>
-                      <td className="py-2 px-3 text-center font-mono">{g.fStatistic.toFixed(2)}</td>
-                      <td className="py-2 px-3 text-center font-mono">{g.varianceRatio.toFixed(3)}</td>
-                      <td className="py-2 px-3 text-center">
-                        {g.direction === "causes" ? (
-                          <Badge className="text-[10px] bg-accent/20 text-accent border-accent/30">Causes</Badge>
-                        ) : (
-                          <Badge variant="outline" className="text-[10px] text-muted-foreground">No effect</Badge>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
+                {surrogates.map((s: SurrogateResult, i: number) => (
+                  <tr key={i} className="border-b border-border/50">
+                    <td className="py-2 px-3">
+                      <div className="flex items-center gap-1.5">
+                        <div className="w-2 h-2 rounded-full" style={{ backgroundColor: MODALITY_COLORS[s.modality] }} />
+                        <span className="font-medium">{s.streamName}</span>
+                      </div>
+                    </td>
+                    <td className="py-2 px-3 text-center font-mono">{s.observedMeanWCC.toFixed(3)}</td>
+                    <td className="py-2 px-3 text-center font-mono text-muted-foreground">
+                      {s.surrogateMean.toFixed(3)} ± {s.surrogateSD.toFixed(3)}
+                    </td>
+                    <td className="py-2 px-3 text-center font-mono">{s.percentileRank.toFixed(0)}%</td>
+                    <td className="py-2 px-3 text-center font-mono">
+                      <span className={s.pValue < 0.05 ? "text-accent font-semibold" : ""}>
+                        {s.pValue < 0.001 ? "<.001" : s.pValue.toFixed(3)}
+                      </span>
+                    </td>
+                    <td className="py-2 px-3 text-center">
+                      {s.significant ? (
+                        <Badge className="text-[10px] bg-accent/20 text-accent border-accent/30">Significant</Badge>
+                      ) : (
+                        <Badge variant="outline" className="text-[10px] text-muted-foreground">n.s.</Badge>
+                      )}
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
+          </div>
+        </Card>
+      )}
+
+      {/* Export Buttons */}
+      {chartData.length > 0 && (
+        <Card className="glass-panel p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <BarChart3 className="w-4 h-4 text-accent" />
+            <h3 className="font-heading text-sm font-semibold">Export Results</h3>
+          </div>
+          <p className="text-[10px] text-muted-foreground">
+            Download analysis results for use in R, SPSS, jamovi, or other statistical software.
+          </p>
+          <div className="flex gap-2 flex-wrap">
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-xs gap-1"
+              onClick={() => {
+                const headers = ["epoch", "time_min", ...modalities];
+                const rows = chartData.map((d: any) => [
+                  d.epoch,
+                  d.time,
+                  ...modalities.map(m => d[m] ?? ""),
+                ]);
+                const csv = [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
+                const blob = new Blob([csv], { type: "text/csv" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = `syncscope_timeline_${selectedRun?.name?.replace(/\s+/g, "_") || "export"}.csv`;
+                a.click();
+                URL.revokeObjectURL(url);
+              }}
+            >
+              📊 Aligned Timeseries (CSV)
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-xs gap-1"
+              onClick={() => {
+                const exportData = {
+                  meta: {
+                    exportedAt: new Date().toISOString(),
+                    analysisRun: selectedRun?.name,
+                    epochMs,
+                    normalization,
+                  },
+                  cascade: cascade,
+                  surrogates: surrogates,
+                  timeseries: chartData,
+                  streams: report?.streams,
+                };
+                const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = `syncscope_cascade_report_${selectedRun?.name?.replace(/\s+/g, "_") || "export"}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+              }}
+            >
+              📋 Full Cascade Report (JSON)
+            </Button>
           </div>
         </Card>
       )}

@@ -398,13 +398,39 @@ const PipelinePage = () => {
               </div>
               <div className="space-y-2">
                 <Label className="text-xs font-heading">Normalization</Label>
-                <Select value={normalization} onValueChange={(v) => setNormalization(v as any)}>
+                <Select value={normalization} onValueChange={(v) => setNormalization(v as NormalizationMethod)}>
                   <SelectTrigger className="h-9 text-sm"><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="zscore">Z-Score (recommended)</SelectItem>
+                    <SelectItem value="zscore">Z-Score — session-global (default)</SelectItem>
+                    <SelectItem value="zscore_baseline">Z-Score — baseline period</SelectItem>
                     <SelectItem value="minmax">Min-Max [0,1]</SelectItem>
                   </SelectContent>
                 </Select>
+                {normalization === "zscore_baseline" && (
+                  <div className="space-y-1 mt-2 p-2 rounded-md bg-muted/30">
+                    <Label className="text-[10px] font-heading">Baseline period (seconds)</Label>
+                    <div className="flex items-center gap-3">
+                      <Slider
+                        value={[baselineMs / 1000]}
+                        onValueChange={([v]) => setBaselineMs(v * 1000)}
+                        min={10}
+                        max={300}
+                        step={10}
+                        className="flex-1"
+                      />
+                      <Badge variant="secondary" className="min-w-[50px] text-center">{baselineMs / 1000}s</Badge>
+                    </div>
+                    <p className="text-[9px] text-muted-foreground">
+                      Z-scores computed using mean &amp; SD from the first {baselineMs / 1000}s only. 
+                      Values outside this baseline can exceed ±1, reflecting genuine synchrony above resting levels.
+                    </p>
+                  </div>
+                )}
+                <p className="text-[9px] text-muted-foreground">
+                  {normalization === "zscore" && "Standardizes using session-wide mean/SD. Simple but may dilute strong synchrony periods."}
+                  {normalization === "zscore_baseline" && "Standardizes against a resting baseline — preserves genuine high-synchrony signal."}
+                  {normalization === "minmax" && "Rescales to [0,1]. Sensitive to outliers; not recommended for cascade detection."}
+                </p>
               </div>
             </div>
 

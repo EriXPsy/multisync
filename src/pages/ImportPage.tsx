@@ -46,6 +46,7 @@ import {
   type SignalGroup,
 } from "@/lib/csv-parser";
 import { parseEDF, edfToParsedCSV } from "@/lib/edf-parser";
+import { validateDyadicData, type ValidationReport } from "@/lib/data-validation";
 
 type StreamMapping = {
   file: File;

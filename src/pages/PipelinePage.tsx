@@ -50,6 +50,7 @@ import { toast } from "sonner";
 import { DEFAULT_WCC_PARAMS } from "@/lib/synchrony-data";
 import { runCascadeAnalysis } from "@/lib/cascade-analysis";
 import { computeWCC, normalize, epochAggregate, type StreamData, type NormalizationMethod } from "@/lib/wcc-compute";
+import { runSurrogateTestBatch, type SurrogateResult } from "@/lib/surrogate-testing";
 import type { Json } from "@/integrations/supabase/types";
 
 const STEPS = [

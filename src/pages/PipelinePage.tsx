@@ -250,6 +250,25 @@ const PipelinePage = () => {
       // Run cascade analysis
       const cascadeReport = runCascadeAnalysis(modalityResults, epochMs);
 
+      // Run surrogate testing (reduced count for browser performance)
+      const surrogateStreams = selectedStreams
+        .filter(s => {
+          const rawData = (s.data as StreamData[]) || [];
+          return rawData.length > 0;
+        })
+        .map(s => {
+          let rawData = (s.data as StreamData[]) || [];
+          const offset = streamOffsets[s.id]?.offsetMs || 0;
+          if (offset !== 0) rawData = rawData.map(d => ({ ...d, t: d.t + offset }));
+          return {
+            data: rawData,
+            name: s.index_name,
+            modality: s.modality,
+            sampleRateHz: s.sample_rate_hz || 30,
+          };
+        });
+      const surrogateResults = runSurrogateTestBatch(surrogateStreams, 5000, 2000, 100);
+
       report.alignment = {
         commonEpochMs: epochMs,
         totalEpochs: maxEpochs,
@@ -257,6 +276,7 @@ const PipelinePage = () => {
         normalization,
       };
       report.cascade = cascadeReport;
+      report.surrogates = surrogateResults;
 
       setAlignmentReport(report);
       setAnalysisResults(chartData);

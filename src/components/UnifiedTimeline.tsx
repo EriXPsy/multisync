@@ -563,6 +563,72 @@ export function UnifiedTimeline() {
         </Card>
       )}
 
+      {/* Export Buttons */}
+      {chartData.length > 0 && (
+        <Card className="glass-panel p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <BarChart3 className="w-4 h-4 text-accent" />
+            <h3 className="font-heading text-sm font-semibold">Export Results</h3>
+          </div>
+          <p className="text-[10px] text-muted-foreground">
+            Download analysis results for use in R, SPSS, jamovi, or other statistical software.
+          </p>
+          <div className="flex gap-2 flex-wrap">
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-xs gap-1"
+              onClick={() => {
+                const headers = ["epoch", "time_min", ...modalities];
+                const rows = chartData.map((d: any) => [
+                  d.epoch,
+                  d.time,
+                  ...modalities.map(m => d[m] ?? ""),
+                ]);
+                const csv = [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
+                const blob = new Blob([csv], { type: "text/csv" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = `syncscope_timeline_${selectedRun?.name?.replace(/\s+/g, "_") || "export"}.csv`;
+                a.click();
+                URL.revokeObjectURL(url);
+              }}
+            >
+              📊 Aligned Timeseries (CSV)
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-xs gap-1"
+              onClick={() => {
+                const exportData = {
+                  meta: {
+                    exportedAt: new Date().toISOString(),
+                    analysisRun: selectedRun?.name,
+                    epochMs,
+                    normalization,
+                  },
+                  cascade: cascade,
+                  surrogates: surrogates,
+                  timeseries: chartData,
+                  streams: report?.streams,
+                };
+                const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = `syncscope_cascade_report_${selectedRun?.name?.replace(/\s+/g, "_") || "export"}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+              }}
+            >
+              📋 Full Cascade Report (JSON)
+            </Button>
+          </div>
+        </Card>
+      )}
+
       {/* Modality Summary Cards with onset info */}
       {modalities.length > 0 && (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">

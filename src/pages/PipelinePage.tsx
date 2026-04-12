@@ -75,7 +75,8 @@ const PipelinePage = () => {
   const [step, setStep] = useState(1);
   const [selectedStreamIds, setSelectedStreamIds] = useState<string[]>([]);
   const [epochMs, setEpochMs] = useState(10000);
-  const [normalization, setNormalization] = useState<"zscore" | "minmax">("zscore");
+  const [normalization, setNormalization] = useState<NormalizationMethod>("zscore");
+  const [baselineMs, setBaselineMs] = useState(60000); // 60s default baseline
   const [streamOffsets, setStreamOffsets] = useState<Record<string, StreamOffset>>({});
   const [analysisResults, setAnalysisResults] = useState<any>(null);
   const [alignmentReport, setAlignmentReport] = useState<any>(null);
@@ -199,10 +200,11 @@ const PipelinePage = () => {
         const windowMs = 5000;
         const lagMs = 2000;
 
-        const wccValues = computeWCC(rawData, windowMs, lagMs, sampleRate);
-        const zScored = zScore(wccValues);
-        const samplesPerEpoch = Math.max(1, Math.round((epochMs / 1000) * (wccValues.length / (rawData.length / sampleRate))));
-        const epoched = epochAggregate(zScored, Math.max(1, samplesPerEpoch));
+        const wccValues = computeWCC(rawData, windowMs, lagMs, sampleRate, true);
+        const wccWindowsPerSec = wccValues.length / (rawData.length / sampleRate);
+        const normalized = normalize(wccValues, { method: normalization, baselineEndMs: baselineMs }, wccWindowsPerSec);
+        const samplesPerEpoch = Math.max(1, Math.round((epochMs / 1000) * wccWindowsPerSec));
+        const epoched = epochAggregate(normalized, Math.max(1, samplesPerEpoch));
 
         modalityResults[stream.modality] = modalityResults[stream.modality] || [];
         if (modalityResults[stream.modality].length === 0) {

@@ -416,6 +416,25 @@ const PipelinePage = () => {
                 <p className="text-[10px] text-muted-foreground">
                   All streams epoch-aggregated to this resolution after WCC at native rates.
                 </p>
+                {epochMs >= 10000 && (
+                  <div className="flex items-start gap-1.5 p-2 rounded-md bg-amber-500/10 border border-amber-500/20 mt-1">
+                    <AlertTriangle className="w-3 h-3 text-amber-500 mt-0.5 flex-shrink-0" />
+                    <p className="text-[9px] text-amber-600">
+                      Large epochs ({epochMs / 1000}s) smooth away fast temporal dynamics. 
+                      Neural cascades happening within seconds will be invisible. 
+                      Cascade detection is limited to the epoch timescale — consider 1-5s for finer resolution (more epochs = more statistical power for Granger tests).
+                    </p>
+                  </div>
+                )}
+                {epochMs <= 2000 && (
+                  <div className="flex items-start gap-1.5 p-2 rounded-md bg-blue-500/10 border border-blue-500/20 mt-1">
+                    <Info className="w-3 h-3 text-blue-500 mt-0.5 flex-shrink-0" />
+                    <p className="text-[9px] text-blue-600">
+                      Fine epochs ({epochMs / 1000}s) preserve temporal detail but may be noisy for slow modalities (bio, psycho). 
+                      Consider whether your slowest stream has meaningful variation at this timescale.
+                    </p>
+                  </div>
+                )}
               </div>
               <div className="space-y-2">
                 <Label className="text-xs font-heading">Normalization</Label>

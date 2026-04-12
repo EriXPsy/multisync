@@ -87,6 +87,10 @@ export function UnifiedTimeline() {
     return report?.cascade || null;
   }, [report]);
 
+  const surrogates: SurrogateResult[] = useMemo(() => {
+    return (report?.surrogates as SurrogateResult[]) || [];
+  }, [report]);
+
   const modalities = useMemo(() => {
     if (!chartData || chartData.length === 0) return [];
     return Object.keys(chartData[0]).filter(

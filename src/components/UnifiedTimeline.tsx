@@ -506,6 +506,63 @@ export function UnifiedTimeline() {
          </Card>
        )}
 
+      {/* Surrogate Testing Results */}
+      {surrogates.length > 0 && (
+        <Card className="glass-panel p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <ShieldCheck className="w-4 h-4 text-accent" />
+            <h3 className="font-heading text-sm font-semibold">Surrogate Significance Testing</h3>
+          </div>
+          <p className="text-[10px] text-muted-foreground">
+            Observed synchrony compared against {surrogates[0]?.nSurrogates || 100} pseudo-pair surrogates (Moulder et al., 2018). 
+            Significant results (p &lt; .05) indicate synchrony exceeds chance levels.
+          </p>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-border">
+                  <th className="text-left py-2 px-3 font-heading">Stream</th>
+                  <th className="text-center py-2 px-3 font-heading">Observed</th>
+                  <th className="text-center py-2 px-3 font-heading">Surrogate μ±σ</th>
+                  <th className="text-center py-2 px-3 font-heading">Percentile</th>
+                  <th className="text-center py-2 px-3 font-heading">p</th>
+                  <th className="text-center py-2 px-3 font-heading">Result</th>
+                </tr>
+              </thead>
+              <tbody>
+                {surrogates.map((s: SurrogateResult, i: number) => (
+                  <tr key={i} className="border-b border-border/50">
+                    <td className="py-2 px-3">
+                      <div className="flex items-center gap-1.5">
+                        <div className="w-2 h-2 rounded-full" style={{ backgroundColor: MODALITY_COLORS[s.modality] }} />
+                        <span className="font-medium">{s.streamName}</span>
+                      </div>
+                    </td>
+                    <td className="py-2 px-3 text-center font-mono">{s.observedMeanWCC.toFixed(3)}</td>
+                    <td className="py-2 px-3 text-center font-mono text-muted-foreground">
+                      {s.surrogateMean.toFixed(3)} ± {s.surrogateSD.toFixed(3)}
+                    </td>
+                    <td className="py-2 px-3 text-center font-mono">{s.percentileRank.toFixed(0)}%</td>
+                    <td className="py-2 px-3 text-center font-mono">
+                      <span className={s.pValue < 0.05 ? "text-accent font-semibold" : ""}>
+                        {s.pValue < 0.001 ? "<.001" : s.pValue.toFixed(3)}
+                      </span>
+                    </td>
+                    <td className="py-2 px-3 text-center">
+                      {s.significant ? (
+                        <Badge className="text-[10px] bg-accent/20 text-accent border-accent/30">Significant</Badge>
+                      ) : (
+                        <Badge variant="outline" className="text-[10px] text-muted-foreground">n.s.</Badge>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
       {/* Modality Summary Cards with onset info */}
       {modalities.length > 0 && (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">

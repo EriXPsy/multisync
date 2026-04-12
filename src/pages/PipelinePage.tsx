@@ -49,6 +49,7 @@ import {
 import { toast } from "sonner";
 import { DEFAULT_WCC_PARAMS } from "@/lib/synchrony-data";
 import { runCascadeAnalysis } from "@/lib/cascade-analysis";
+import { computeWCC, normalize, epochAggregate, type StreamData, type NormalizationMethod } from "@/lib/wcc-compute";
 import type { Json } from "@/integrations/supabase/types";
 
 const STEPS = [
@@ -65,53 +66,7 @@ const MODALITY_COLORS: Record<string, string> = {
   psycho: "hsl(35, 80%, 55%)",
 };
 
-type StreamData = { t: number; p1: number; p2: number };
-
-function computeWCC(data: StreamData[], windowMs: number, lagMs: number, sampleRateHz: number): number[] {
-  const windowSamples = Math.max(1, Math.round((windowMs / 1000) * sampleRateHz));
-  const results: number[] = [];
-  for (let i = 0; i < data.length - windowSamples; i += Math.max(1, Math.floor(windowSamples / 2))) {
-    const w1 = data.slice(i, i + windowSamples).map((d) => d.p1);
-    const w2 = data.slice(i, i + windowSamples).map((d) => d.p2);
-    const m1 = w1.reduce((a, b) => a + b, 0) / w1.length;
-    const m2 = w2.reduce((a, b) => a + b, 0) / w2.length;
-    const s1 = Math.sqrt(w1.reduce((a, b) => a + (b - m1) ** 2, 0) / w1.length);
-    const s2 = Math.sqrt(w2.reduce((a, b) => a + (b - m2) ** 2, 0) / w2.length);
-    if (s1 === 0 || s2 === 0) { results.push(0); continue; }
-    let maxCorr = 0;
-    const lagSamples = Math.round((lagMs / 1000) * sampleRateHz);
-    for (let lag = -lagSamples; lag <= lagSamples; lag++) {
-      let sum = 0, count = 0;
-      for (let j = 0; j < windowSamples; j++) {
-        const j2 = j + lag;
-        if (j2 >= 0 && j2 < windowSamples) {
-          sum += ((w1[j] - m1) / s1) * ((w2[j2] - m2) / s2);
-          count++;
-        }
-      }
-      const corr = count > 0 ? sum / count : 0;
-      if (Math.abs(corr) > Math.abs(maxCorr)) maxCorr = corr;
-    }
-    results.push(maxCorr);
-  }
-  return results;
-}
-
-function zScore(values: number[]): number[] {
-  const mean = values.reduce((a, b) => a + b, 0) / values.length;
-  const std = Math.sqrt(values.reduce((a, b) => a + (b - mean) ** 2, 0) / values.length);
-  if (std === 0) return values.map(() => 0);
-  return values.map((v) => (v - mean) / std);
-}
-
-function epochAggregate(values: number[], epochSamples: number): number[] {
-  const result: number[] = [];
-  for (let i = 0; i < values.length; i += epochSamples) {
-    const chunk = values.slice(i, i + epochSamples);
-    result.push(chunk.reduce((a, b) => a + b, 0) / chunk.length);
-  }
-  return result;
-}
+// StreamData type and computation functions imported from @/lib/wcc-compute
 
 type StreamOffset = { streamId: string; offsetMs: number; anchorMethod: "none" | "first_nonzero" | "manual" };
 

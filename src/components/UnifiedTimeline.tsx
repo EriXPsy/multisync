@@ -25,7 +25,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Brain, Eye, Heart, Users, Info, AlertTriangle, BarChart3, ArrowRight, TrendingUp, Zap, GitBranch } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import type { CascadeReport, OnsetResult, LeadLagResult, GrangerResult } from "@/lib/cascade-analysis";
+import type { CascadeReport, OnsetResult, LeadLagResult, GrangerResult, SensitivityResult } from "@/lib/cascade-analysis";
 
 const MODALITY_ICONS: Record<string, any> = {
   neural: Brain,

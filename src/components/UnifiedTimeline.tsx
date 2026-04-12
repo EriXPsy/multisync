@@ -383,55 +383,123 @@ export function UnifiedTimeline() {
             <GitBranch className="w-4 h-4 text-accent" />
             <h3 className="font-heading text-sm font-semibold">Directional Influence (Granger Causality)</h3>
           </div>
-          <p className="text-[10px] text-muted-foreground">
-            Tests whether past values of one modality's synchrony improve prediction of another (Granger, 1969; Quan et al., 2025). 
-            Variance ratio &gt; 1 and F &gt; 2 suggest directional influence.
-          </p>
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="border-b border-border">
-                  <th className="text-left py-2 px-3 font-heading">Cause</th>
-                  <th className="text-left py-2 px-3 font-heading">Effect</th>
-                  <th className="text-center py-2 px-3 font-heading">F-stat</th>
-                  <th className="text-center py-2 px-3 font-heading">Var Ratio</th>
-                  <th className="text-center py-2 px-3 font-heading">Result</th>
-                </tr>
-              </thead>
-              <tbody>
-                {cascade.grangerResults
-                  .sort((a: GrangerResult, b: GrangerResult) => b.fStatistic - a.fStatistic)
-                  .map((g: GrangerResult, i: number) => (
-                    <tr key={i} className="border-b border-border/50">
-                      <td className="py-2 px-3">
-                        <div className="flex items-center gap-1.5">
-                          <div className="w-2 h-2 rounded-full" style={{ backgroundColor: MODALITY_COLORS[g.cause] }} />
-                          <span className="capitalize font-medium">{g.cause}</span>
-                        </div>
-                      </td>
-                      <td className="py-2 px-3">
-                        <div className="flex items-center gap-1.5">
-                          <ArrowRight className="w-3 h-3 text-muted-foreground" />
-                          <div className="w-2 h-2 rounded-full" style={{ backgroundColor: MODALITY_COLORS[g.effect] }} />
-                          <span className="capitalize">{g.effect}</span>
-                        </div>
-                      </td>
-                      <td className="py-2 px-3 text-center font-mono">{g.fStatistic.toFixed(2)}</td>
-                      <td className="py-2 px-3 text-center font-mono">{g.varianceRatio.toFixed(3)}</td>
-                      <td className="py-2 px-3 text-center">
-                        {g.direction === "causes" ? (
-                          <Badge className="text-[10px] bg-accent/20 text-accent border-accent/30">Causes</Badge>
-                        ) : (
-                          <Badge variant="outline" className="text-[10px] text-muted-foreground">No effect</Badge>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
-          </div>
-        </Card>
-      )}
+           <p className="text-[10px] text-muted-foreground">
+             Tests whether past values of one modality's synchrony improve prediction of another (Granger, 1969). 
+             P-values are Bonferroni-corrected for {cascade.grangerResults.length} comparisons. η² = partial eta-squared effect size.
+           </p>
+           <div className="overflow-x-auto">
+             <table className="w-full text-xs">
+               <thead>
+                 <tr className="border-b border-border">
+                   <th className="text-left py-2 px-3 font-heading">Cause</th>
+                   <th className="text-left py-2 px-3 font-heading">Effect</th>
+                   <th className="text-center py-2 px-3 font-heading">F</th>
+                   <th className="text-center py-2 px-3 font-heading">p (corr)</th>
+                   <th className="text-center py-2 px-3 font-heading">η²</th>
+                   <th className="text-center py-2 px-3 font-heading">Result</th>
+                 </tr>
+               </thead>
+               <tbody>
+                 {cascade.grangerResults
+                   .sort((a: GrangerResult, b: GrangerResult) => b.fStatistic - a.fStatistic)
+                   .map((g: GrangerResult, i: number) => (
+                     <tr key={i} className="border-b border-border/50">
+                       <td className="py-2 px-3">
+                         <div className="flex items-center gap-1.5">
+                           <div className="w-2 h-2 rounded-full" style={{ backgroundColor: MODALITY_COLORS[g.cause] }} />
+                           <span className="capitalize font-medium">{g.cause}</span>
+                         </div>
+                       </td>
+                       <td className="py-2 px-3">
+                         <div className="flex items-center gap-1.5">
+                           <ArrowRight className="w-3 h-3 text-muted-foreground" />
+                           <div className="w-2 h-2 rounded-full" style={{ backgroundColor: MODALITY_COLORS[g.effect] }} />
+                           <span className="capitalize">{g.effect}</span>
+                         </div>
+                       </td>
+                       <td className="py-2 px-3 text-center font-mono">{g.fStatistic.toFixed(2)}</td>
+                       <td className="py-2 px-3 text-center font-mono">
+                         {g.pValueCorrected != null ? (
+                           <span className={g.pValueCorrected < 0.05 ? "text-accent font-semibold" : ""}>
+                             {g.pValueCorrected < 0.001 ? "<.001" : g.pValueCorrected.toFixed(3)}
+                           </span>
+                         ) : "—"}
+                       </td>
+                       <td className="py-2 px-3 text-center font-mono">
+                         {g.effectSize != null ? g.effectSize.toFixed(3) : "—"}
+                       </td>
+                       <td className="py-2 px-3 text-center">
+                         <div className="flex items-center justify-center gap-1">
+                           {g.direction === "causes" ? (
+                             <Badge className="text-[10px] bg-accent/20 text-accent border-accent/30">Causes</Badge>
+                           ) : (
+                             <Badge variant="outline" className="text-[10px] text-muted-foreground">No effect</Badge>
+                           )}
+                           {g.underpowered && (
+                             <Badge variant="outline" className="text-[9px] text-amber-500 border-amber-500/30">Low n</Badge>
+                           )}
+                         </div>
+                       </td>
+                     </tr>
+                   ))}
+               </tbody>
+             </table>
+           </div>
+         </Card>
+       )}
+
+       {/* Onset Sensitivity Analysis */}
+       {cascade && cascade.sensitivityAnalysis && cascade.sensitivityAnalysis.length > 0 && (
+         <Card className="glass-panel p-4 space-y-3">
+           <div className="flex items-center gap-2">
+             <TrendingUp className="w-4 h-4 text-accent" />
+             <h3 className="font-heading text-sm font-semibold">Onset Threshold Sensitivity</h3>
+             {cascade.cascadeStability != null && (
+               <Badge variant={cascade.cascadeStability >= 0.7 ? "default" : "secondary"} className="text-[10px]">
+                 Stability: {(cascade.cascadeStability * 100).toFixed(0)}%
+               </Badge>
+             )}
+           </div>
+           <p className="text-[10px] text-muted-foreground">
+             Cascade order at different onset thresholds (0.25σ–1.5σ). High stability means the leading modality is robust to threshold choice.
+           </p>
+           <div className="overflow-x-auto">
+             <table className="w-full text-xs">
+               <thead>
+                 <tr className="border-b border-border">
+                   <th className="text-left py-2 px-3 font-heading">Threshold</th>
+                   <th className="text-left py-2 px-3 font-heading">Cascade Order</th>
+                 </tr>
+               </thead>
+               <tbody>
+                 {cascade.sensitivityAnalysis.map((s: SensitivityResult, i: number) => (
+                   <tr key={i} className={`border-b border-border/50 ${s.threshold === cascade.thresholdSigma ? "bg-accent/5" : ""}`}>
+                     <td className="py-2 px-3 font-mono">
+                       {s.threshold.toFixed(2)}σ
+                       {s.threshold === cascade.thresholdSigma && (
+                         <span className="text-accent ml-1">←</span>
+                       )}
+                     </td>
+                     <td className="py-2 px-3">
+                       <div className="flex items-center gap-1 flex-wrap">
+                         {s.cascadeOrder.map((mod, j) => (
+                           <span key={j} className="flex items-center gap-0.5">
+                             {j > 0 && <ArrowRight className="w-2.5 h-2.5 text-muted-foreground" />}
+                             <span className="capitalize" style={{ color: MODALITY_COLORS[mod] || "inherit" }}>{mod}</span>
+                           </span>
+                         ))}
+                         {s.cascadeOrder.length === 0 && (
+                           <span className="text-muted-foreground italic">No modality crossed threshold</span>
+                         )}
+                       </div>
+                     </td>
+                   </tr>
+                 ))}
+               </tbody>
+             </table>
+           </div>
+         </Card>
+       )}
 
       {/* Modality Summary Cards with onset info */}
       {modalities.length > 0 && (

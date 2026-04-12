@@ -208,6 +208,18 @@ export function UnifiedTimeline() {
               </div>
 
               <p className="text-xs text-muted-foreground leading-relaxed">{cascade.summary}</p>
+
+              {/* Warnings */}
+              {cascade.warnings && cascade.warnings.length > 0 && (
+                <div className="space-y-1 mt-2">
+                  {cascade.warnings.map((w: string, i: number) => (
+                    <div key={i} className="flex items-start gap-1.5 text-[10px] text-amber-600">
+                      <AlertTriangle className="w-3 h-3 mt-0.5 flex-shrink-0" />
+                      <span>{w}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </Card>

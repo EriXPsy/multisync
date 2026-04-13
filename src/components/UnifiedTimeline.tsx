@@ -389,19 +389,29 @@ export function UnifiedTimeline() {
             <h3 className="font-heading text-sm font-semibold">Directional Influence (Granger Causality)</h3>
           </div>
            <p className="text-[10px] text-muted-foreground">
-             Tests whether past values of one modality's synchrony improve prediction of another (Granger, 1969). 
+             Granger tests with BIC-selected lag order and ADF stationarity pre-check.
              P-values are Bonferroni-corrected for {cascade.grangerResults.length} comparisons. η² = partial eta-squared effect size.
            </p>
+           {/* P-value approximation warning */}
+           <div className="flex items-start gap-1.5 p-2 rounded-md bg-amber-500/10 border border-amber-500/20">
+             <AlertTriangle className="w-3 h-3 text-amber-500 mt-0.5 flex-shrink-0" />
+             <p className="text-[9px] text-amber-600">
+               P-values use Wilson-Hilferty F-approximation — suitable for <strong>exploratory screening only</strong>, 
+               not for publication-quality inference. Validate significant results with exact F-tables or permutation tests.
+             </p>
+           </div>
            <div className="overflow-x-auto">
              <table className="w-full text-xs">
                <thead>
                  <tr className="border-b border-border">
-                   <th className="text-left py-2 px-3 font-heading">Cause</th>
-                   <th className="text-left py-2 px-3 font-heading">Effect</th>
-                   <th className="text-center py-2 px-3 font-heading">F</th>
-                   <th className="text-center py-2 px-3 font-heading">p (corr)</th>
-                   <th className="text-center py-2 px-3 font-heading">η²</th>
-                   <th className="text-center py-2 px-3 font-heading">Result</th>
+                   <th className="text-left py-2 px-2 font-heading">Cause</th>
+                   <th className="text-left py-2 px-2 font-heading">Effect</th>
+                   <th className="text-center py-2 px-2 font-heading">Lag</th>
+                   <th className="text-center py-2 px-2 font-heading">F</th>
+                   <th className="text-center py-2 px-2 font-heading">p (corr)</th>
+                   <th className="text-center py-2 px-2 font-heading">η²</th>
+                   <th className="text-center py-2 px-2 font-heading">Stationarity</th>
+                   <th className="text-center py-2 px-2 font-heading">Result</th>
                  </tr>
                </thead>
                <tbody>

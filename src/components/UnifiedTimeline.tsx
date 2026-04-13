@@ -419,31 +419,42 @@ export function UnifiedTimeline() {
                    .sort((a: GrangerResult, b: GrangerResult) => b.fStatistic - a.fStatistic)
                    .map((g: GrangerResult, i: number) => (
                      <tr key={i} className="border-b border-border/50">
-                       <td className="py-2 px-3">
+                       <td className="py-2 px-2">
                          <div className="flex items-center gap-1.5">
                            <div className="w-2 h-2 rounded-full" style={{ backgroundColor: MODALITY_COLORS[g.cause] }} />
                            <span className="capitalize font-medium">{g.cause}</span>
                          </div>
                        </td>
-                       <td className="py-2 px-3">
+                       <td className="py-2 px-2">
                          <div className="flex items-center gap-1.5">
                            <ArrowRight className="w-3 h-3 text-muted-foreground" />
                            <div className="w-2 h-2 rounded-full" style={{ backgroundColor: MODALITY_COLORS[g.effect] }} />
                            <span className="capitalize">{g.effect}</span>
                          </div>
                        </td>
-                       <td className="py-2 px-3 text-center font-mono">{g.fStatistic.toFixed(2)}</td>
-                       <td className="py-2 px-3 text-center font-mono">
+                       <td className="py-2 px-2 text-center font-mono">
+                         {(g as any).selectedLag != null ? `${(g as any).selectedLag}` : "1"}
+                         <span className="text-muted-foreground text-[9px] ml-0.5">ep</span>
+                       </td>
+                       <td className="py-2 px-2 text-center font-mono">{g.fStatistic.toFixed(2)}</td>
+                       <td className="py-2 px-2 text-center font-mono">
                          {g.pValueCorrected != null ? (
                            <span className={g.pValueCorrected < 0.05 ? "text-accent font-semibold" : ""}>
                              {g.pValueCorrected < 0.001 ? "<.001" : g.pValueCorrected.toFixed(3)}
                            </span>
                          ) : "—"}
                        </td>
-                       <td className="py-2 px-3 text-center font-mono">
+                       <td className="py-2 px-2 text-center font-mono">
                          {g.effectSize != null ? g.effectSize.toFixed(3) : "—"}
                        </td>
-                       <td className="py-2 px-3 text-center">
+                       <td className="py-2 px-2 text-center">
+                         {(g as any).differenced ? (
+                           <Badge variant="outline" className="text-[9px] text-amber-500 border-amber-500/30">Δ diff</Badge>
+                         ) : (
+                           <Badge variant="outline" className="text-[9px] text-green-600 border-green-500/30">OK</Badge>
+                         )}
+                       </td>
+                       <td className="py-2 px-2 text-center">
                          <div className="flex items-center justify-center gap-1">
                            {g.direction === "causes" ? (
                              <Badge className="text-[10px] bg-accent/20 text-accent border-accent/30">Causes</Badge>

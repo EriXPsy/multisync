@@ -49,7 +49,7 @@ import {
 import { toast } from "sonner";
 import { DEFAULT_WCC_PARAMS } from "@/lib/synchrony-data";
 import { runCascadeAnalysis } from "@/lib/cascade-analysis";
-import { computeWCC, normalize, epochAggregate, type StreamData, type NormalizationMethod } from "@/lib/wcc-compute";
+import { computeWCCDirectional, normalize, epochAggregate, epochAggregateDirectional, type StreamData, type NormalizationMethod, type EpochDirectionalResult } from "@/lib/wcc-compute";
 import { runSurrogateTestBatch, type SurrogateResult } from "@/lib/surrogate-testing";
 import type { Json } from "@/integrations/supabase/types";
 
@@ -187,6 +187,7 @@ const PipelinePage = () => {
       const selectedStreams = allStreams?.filter((s) => selectedStreamIds.includes(s.id)) || [];
       const report: any = { streams: [], alignment: {}, offsets: {}, crossDataset: isCrossDataset };
       const modalityResults: Record<string, number[]> = {};
+      const modalityDirectional: Record<string, EpochDirectionalResult[]> = {};
 
       for (const stream of selectedStreams) {
         let rawData = (stream.data as StreamData[]) || [];
@@ -201,15 +202,21 @@ const PipelinePage = () => {
         const windowMs = 5000;
         const lagMs = 2000;
 
-        const wccValues = computeWCC(rawData, windowMs, lagMs, sampleRate, true);
+        // Directional WCC
+        const wccWindows = computeWCCDirectional(rawData, windowMs, lagMs, sampleRate, true);
+        const wccValues = wccWindows.map(w => w.peakAbsCorrelation);
         const wccWindowsPerSec = wccValues.length / (rawData.length / sampleRate);
         const normalized = normalize(wccValues, { method: normalization, baselineEndMs: baselineMs }, wccWindowsPerSec);
         const samplesPerEpoch = Math.max(1, Math.round((epochMs / 1000) * wccWindowsPerSec));
         const epoched = epochAggregate(normalized, Math.max(1, samplesPerEpoch));
 
+        // Directional epoch aggregation
+        const epochDir = epochAggregateDirectional(wccWindows, Math.max(1, samplesPerEpoch));
+
         modalityResults[stream.modality] = modalityResults[stream.modality] || [];
         if (modalityResults[stream.modality].length === 0) {
           modalityResults[stream.modality] = epoched;
+          modalityDirectional[stream.modality] = epochDir;
         } else {
           const existing = modalityResults[stream.modality];
           const minLen = Math.min(existing.length, epoched.length);
@@ -243,6 +250,14 @@ const PipelinePage = () => {
         };
         for (const [mod, vals] of Object.entries(modalityResults)) {
           point[mod] = vals[i] ?? null;
+          // Add directional info
+          const dir = modalityDirectional[mod]?.[i];
+          if (dir) {
+            point[`${mod}_direction`] = dir.direction;
+            point[`${mod}_signed`] = dir.meanSigned;
+            point[`${mod}_lagMs`] = dir.meanLagMs;
+            point[`${mod}_fracNeg`] = dir.fractionNegative;
+          }
         }
         return point;
       });

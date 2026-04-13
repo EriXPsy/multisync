@@ -389,19 +389,29 @@ export function UnifiedTimeline() {
             <h3 className="font-heading text-sm font-semibold">Directional Influence (Granger Causality)</h3>
           </div>
            <p className="text-[10px] text-muted-foreground">
-             Tests whether past values of one modality's synchrony improve prediction of another (Granger, 1969). 
+             Granger tests with BIC-selected lag order and ADF stationarity pre-check.
              P-values are Bonferroni-corrected for {cascade.grangerResults.length} comparisons. η² = partial eta-squared effect size.
            </p>
+           {/* P-value approximation warning */}
+           <div className="flex items-start gap-1.5 p-2 rounded-md bg-amber-500/10 border border-amber-500/20">
+             <AlertTriangle className="w-3 h-3 text-amber-500 mt-0.5 flex-shrink-0" />
+             <p className="text-[9px] text-amber-600">
+               P-values use Wilson-Hilferty F-approximation — suitable for <strong>exploratory screening only</strong>, 
+               not for publication-quality inference. Validate significant results with exact F-tables or permutation tests.
+             </p>
+           </div>
            <div className="overflow-x-auto">
              <table className="w-full text-xs">
                <thead>
                  <tr className="border-b border-border">
-                   <th className="text-left py-2 px-3 font-heading">Cause</th>
-                   <th className="text-left py-2 px-3 font-heading">Effect</th>
-                   <th className="text-center py-2 px-3 font-heading">F</th>
-                   <th className="text-center py-2 px-3 font-heading">p (corr)</th>
-                   <th className="text-center py-2 px-3 font-heading">η²</th>
-                   <th className="text-center py-2 px-3 font-heading">Result</th>
+                   <th className="text-left py-2 px-2 font-heading">Cause</th>
+                   <th className="text-left py-2 px-2 font-heading">Effect</th>
+                   <th className="text-center py-2 px-2 font-heading">Lag</th>
+                   <th className="text-center py-2 px-2 font-heading">F</th>
+                   <th className="text-center py-2 px-2 font-heading">p (corr)</th>
+                   <th className="text-center py-2 px-2 font-heading">η²</th>
+                   <th className="text-center py-2 px-2 font-heading">Stationarity</th>
+                   <th className="text-center py-2 px-2 font-heading">Result</th>
                  </tr>
                </thead>
                <tbody>
@@ -409,31 +419,42 @@ export function UnifiedTimeline() {
                    .sort((a: GrangerResult, b: GrangerResult) => b.fStatistic - a.fStatistic)
                    .map((g: GrangerResult, i: number) => (
                      <tr key={i} className="border-b border-border/50">
-                       <td className="py-2 px-3">
+                       <td className="py-2 px-2">
                          <div className="flex items-center gap-1.5">
                            <div className="w-2 h-2 rounded-full" style={{ backgroundColor: MODALITY_COLORS[g.cause] }} />
                            <span className="capitalize font-medium">{g.cause}</span>
                          </div>
                        </td>
-                       <td className="py-2 px-3">
+                       <td className="py-2 px-2">
                          <div className="flex items-center gap-1.5">
                            <ArrowRight className="w-3 h-3 text-muted-foreground" />
                            <div className="w-2 h-2 rounded-full" style={{ backgroundColor: MODALITY_COLORS[g.effect] }} />
                            <span className="capitalize">{g.effect}</span>
                          </div>
                        </td>
-                       <td className="py-2 px-3 text-center font-mono">{g.fStatistic.toFixed(2)}</td>
-                       <td className="py-2 px-3 text-center font-mono">
+                       <td className="py-2 px-2 text-center font-mono">
+                         {(g as any).selectedLag != null ? `${(g as any).selectedLag}` : "1"}
+                         <span className="text-muted-foreground text-[9px] ml-0.5">ep</span>
+                       </td>
+                       <td className="py-2 px-2 text-center font-mono">{g.fStatistic.toFixed(2)}</td>
+                       <td className="py-2 px-2 text-center font-mono">
                          {g.pValueCorrected != null ? (
                            <span className={g.pValueCorrected < 0.05 ? "text-accent font-semibold" : ""}>
                              {g.pValueCorrected < 0.001 ? "<.001" : g.pValueCorrected.toFixed(3)}
                            </span>
                          ) : "—"}
                        </td>
-                       <td className="py-2 px-3 text-center font-mono">
+                       <td className="py-2 px-2 text-center font-mono">
                          {g.effectSize != null ? g.effectSize.toFixed(3) : "—"}
                        </td>
-                       <td className="py-2 px-3 text-center">
+                       <td className="py-2 px-2 text-center">
+                         {(g as any).differenced ? (
+                           <Badge variant="outline" className="text-[9px] text-amber-500 border-amber-500/30">Δ diff</Badge>
+                         ) : (
+                           <Badge variant="outline" className="text-[9px] text-green-600 border-green-500/30">OK</Badge>
+                         )}
+                       </td>
+                       <td className="py-2 px-2 text-center">
                          <div className="flex items-center justify-center gap-1">
                            {g.direction === "causes" ? (
                              <Badge className="text-[10px] bg-accent/20 text-accent border-accent/30">Causes</Badge>

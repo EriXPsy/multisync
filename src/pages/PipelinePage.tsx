@@ -45,12 +45,17 @@ import {
   Info,
   Clock,
   Anchor,
+  TrendingUp,
+  Zap,
+  Target,
 } from "lucide-react";
 import { toast } from "sonner";
 import { DEFAULT_WCC_PARAMS } from "@/lib/synchrony-data";
 import { runCascadeAnalysis } from "@/lib/cascade-analysis";
 import { computeWCCDirectional, normalize, epochAggregate, epochAggregateDirectional, type StreamData, type NormalizationMethod, type EpochDirectionalResult } from "@/lib/wcc-compute";
 import { runSurrogateTestBatch, type SurrogateResult } from "@/lib/surrogate-testing";
+import { runDynamicFeatureExtraction, type DynamicFeatureReport } from "@/lib/dynamic-features";
+import { runPredictionWindowAnalysis, type PredictionResult } from "@/lib/prediction-window";
 import type { Json } from "@/integrations/supabase/types";
 
 const STEPS = [
@@ -81,6 +86,8 @@ const PipelinePage = () => {
   const [streamOffsets, setStreamOffsets] = useState<Record<string, StreamOffset>>({});
   const [analysisResults, setAnalysisResults] = useState<any>(null);
   const [alignmentReport, setAlignmentReport] = useState<any>(null);
+  const [dynamicReport, setDynamicReport] = useState<DynamicFeatureReport | null>(null);
+  const [predictionResult, setPredictionResult] = useState<PredictionResult | null>(null);
   const [running, setRunning] = useState(false);
 
   // Fetch ALL datasets
@@ -265,6 +272,18 @@ const PipelinePage = () => {
       // Run cascade analysis
       const cascadeReport = runCascadeAnalysis(modalityResults, epochMs);
 
+      // Run dynamic feature extraction
+      const dynReport = runDynamicFeatureExtraction(modalityResults, epochMs);
+      setDynamicReport(dynReport);
+
+      // Run prediction window analysis
+      const predResult = runPredictionWindowAnalysis(modalityResults, epochMs, {
+        deltaT: Math.max(1, Math.round(20000 / epochMs)), // predict 20s ahead
+        thresholdSigma: 0.5,
+        useChangeRate: true,
+      });
+      setPredictionResult(predResult);
+
       // Run surrogate testing (reduced count for browser performance)
       const surrogateStreams = selectedStreams
         .filter(s => {
@@ -292,6 +311,8 @@ const PipelinePage = () => {
       };
       report.cascade = cascadeReport;
       report.surrogates = surrogateResults;
+      report.dynamic = dynReport;
+      report.prediction = predResult;
 
       setAlignmentReport(report);
       setAnalysisResults(chartData);
@@ -722,6 +743,163 @@ const PipelinePage = () => {
               <Button variant="outline" onClick={() => setStep(2)}>Adjust Parameters</Button>
               <Button variant="outline" onClick={() => setStep(1)}>New Analysis</Button>
             </div>
+
+            {/* Dynamic Features Panel */}
+            {dynamicReport && (
+              <Card className="glass-panel p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                  <TrendingUp className="w-4 h-4 text-accent" />
+                  <h3 className="font-heading text-sm font-semibold">Dynamic Feature Extraction</h3>
+                  <Badge variant="outline" className="text-[10px]">Process, not just level</Badge>
+                </div>
+
+                <p className="text-xs text-muted-foreground">
+                  {dynamicReport.summary}
+                </p>
+
+                {/* Per-modality feature table */}
+                <div className="overflow-x-auto">
+                  <table className="w-full text-[10px]">
+                    <thead>
+                      <tr className="border-b border-border">
+                        <th className="text-left py-1 pr-3 font-heading font-semibold">Modality</th>
+                        <th className="text-right py-1 px-2 font-heading">Onset</th>
+                        <th className="text-right py-1 px-2 font-heading">Build-up</th>
+                        <th className="text-right py-1 px-2 font-heading">Peak</th>
+                        <th className="text-right py-1 px-2 font-heading">Maintain</th>
+                        <th className="text-right py-1 px-2 font-heading">Breakdowns</th>
+                        <th className="text-right py-1 px-2 font-heading">Recovery</th>
+                        <th className="text-right py-1 px-2 font-heading">Entropy</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {dynamicReport.perModality.map((f) => (
+                        <tr key={f.modality} className="border-b border-border/50">
+                          <td className="py-1 pr-3 font-medium capitalize">
+                            <span className="inline-block w-2 h-2 rounded-full mr-1.5" style={{ backgroundColor: MODALITY_COLORS[f.modality] }} />
+                            {f.modality}
+                          </td>
+                          <td className="text-right py-1 px-2">{f.onsetLatencySec !== null ? `${f.onsetLatencySec}s` : "—"}</td>
+                          <td className="text-right py-1 px-2">{f.buildUpRate !== null ? f.buildUpRate.toFixed(3) : "—"}</td>
+                          <td className="text-right py-1 px-2">{f.peakValue.toFixed(3)}</td>
+                          <td className="text-right py-1 px-2">{f.maintenanceDurationSec !== null ? `${f.maintenanceDurationSec}s` : "—"}</td>
+                          <td className="text-right py-1 px-2">
+                            <span className={f.breakdownCount >= 3 ? "text-red-500 font-semibold" : ""}>{f.breakdownCount}</span>
+                          </td>
+                          <td className="text-right py-1 px-2">{f.avgRecoveryEpochs !== null ? `${f.avgRecoveryEpochs.toFixed(1)}e` : "—"}</td>
+                          <td className="text-right py-1 px-2">
+                            <span className={f.entrainmentEntropy < 2 ? "text-green-600" : f.entrainmentEntropy > 3 ? "text-amber-600" : ""}>
+                              {f.entrainmentEntropy.toFixed(2)}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Cross-modality features */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                  <div className="bg-muted/30 rounded-lg p-2 text-center">
+                    <p className="text-[9px] text-muted-foreground">Cascade Leader</p>
+                    <p className="text-sm font-heading font-semibold capitalize">{dynamicReport.crossModality.leaderModality || "—"}</p>
+                  </div>
+                  <div className="bg-muted/30 rounded-lg p-2 text-center">
+                    <p className="text-[9px] text-muted-foreground">Cascade Delay</p>
+                    <p className="text-sm font-heading font-semibold">{dynamicReport.crossModality.cascadeOnsetDelaySec !== null ? `${dynamicReport.crossModality.cascadeOnsetDelaySec}s` : "—"}</p>
+                  </div>
+                  <div className="bg-muted/30 rounded-lg p-2 text-center">
+                    <p className="text-[9px] text-muted-foreground">Multi-sync Epochs</p>
+                    <p className="text-sm font-heading font-semibold">{dynamicReport.crossModality.multimodalCoherenceEpochs}</p>
+                  </div>
+                  <div className="bg-muted/30 rounded-lg p-2 text-center">
+                    <p className="text-[9px] text-muted-foreground">Full-Chord %</p>
+                    <p className="text-sm font-heading font-semibold">{(dynamicReport.crossModality.fullChordProportion * 100).toFixed(1)}%</p>
+                  </div>
+                </div>
+
+                <p className="text-[9px] text-muted-foreground italic">
+                  Build-up: z-score change per epoch (higher = faster emergence). Entropy: signal regularity (lower = more entrained). Full-Chord: epochs where ALL modalities are synchronized.
+                </p>
+              </Card>
+            )}
+
+            {/* Prediction Window Panel */}
+            {predictionResult && (
+              <Card className="glass-panel p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                  <Zap className="w-4 h-4 text-amber-500" />
+                  <h3 className="font-heading text-sm font-semibold">Prediction Window Analysis</h3>
+                  <Badge variant="outline" className="text-[10px]">Prelude Signal Detection</Badge>
+                </div>
+
+                <p className="text-xs text-muted-foreground">
+                  Can current synchrony patterns predict multimodal synchrony {predictionResult.deltaTSec}s in the future?
+                </p>
+
+                {predictionResult.warnings.map((w, i) => (
+                  <div key={i} className="flex items-start gap-1.5 p-2 rounded-md bg-amber-500/10 border border-amber-500/20">
+                    <AlertTriangle className="w-3 h-3 text-amber-500 mt-0.5 flex-shrink-0" />
+                    <p className="text-[9px] text-amber-600">{w}</p>
+                  </div>
+                ))}
+
+                <p className="text-xs">{predictionResult.summary}</p>
+
+                {/* Performance metrics */}
+                <div className="grid grid-cols-3 md:grid-cols-6 gap-2">
+                  {[
+                    { label: "Accuracy", value: (predictionResult.accuracy * 100).toFixed(1), suffix: "%" },
+                    { label: "F1 Score", value: (predictionResult.f1 * 100).toFixed(1), suffix: "%" },
+                    { label: "AUC", value: predictionResult.auc.toFixed(3), suffix: "", highlight: predictionResult.auc > 0.7 },
+                    { label: "Sensitivity", value: (predictionResult.sensitivity * 100).toFixed(1), suffix: "%" },
+                    { label: "Specificity", value: (predictionResult.specificity * 100).toFixed(1), suffix: "%" },
+                    { label: "Samples", value: String(predictionResult.totalSamples), suffix: "" },
+                  ].map((m) => (
+                    <div key={m.label} className={`bg-muted/30 rounded-lg p-2 text-center ${"highlight" in m && m.highlight ? "ring-1 ring-green-500/50" : ""}`}>
+                      <p className="text-[9px] text-muted-foreground">{m.label}</p>
+                      <p className="text-sm font-heading font-semibold">{m.value}{m.suffix}</p>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Feature importance */}
+                {predictionResult.featureImportance.length > 0 && (
+                  <div className="space-y-1.5">
+                    <p className="text-xs font-heading font-semibold flex items-center gap-1">
+                      <Target className="w-3 h-3" /> Top Predictors (Feature Importance)
+                    </p>
+                    {predictionResult.featureImportance.slice(0, 6).map((f, i) => (
+                      <div key={i} className="flex items-center gap-2">
+                        <span className="text-[10px] text-muted-foreground w-20 truncate">{f.description}</span>
+                        <div className="flex-1 h-3 bg-muted/50 rounded-full overflow-hidden">
+                          <div
+                            className={`h-full rounded-full ${f.weight > 0 ? "bg-green-500" : "bg-red-500"}`}
+                            style={{
+                              width: `${Math.min(100, (Math.abs(f.weight) / Math.max(...predictionResult.featureImportance.map(x => Math.abs(x.weight)))) * 100)}%`,
+                            }}
+                          />
+                        </div>
+                        <span className="text-[10px] font-mono w-12 text-right">
+                          {f.weight > 0 ? "+" : ""}{f.weight.toFixed(3)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Confusion matrix */}
+                <div className="flex items-center gap-4 text-[10px] text-muted-foreground">
+                  <span>Confusion: TP={predictionResult.tp} FP={predictionResult.fp} TN={predictionResult.tn} FN={predictionResult.fn}</span>
+                  <span>Model: {predictionResult.model}</span>
+                  <span>Horizon: {predictionResult.deltaTSec}s ahead</span>
+                </div>
+
+                <p className="text-[9px] text-muted-foreground italic">
+                  This is a proof-of-concept logistic regression with leave-one-out CV. For publication, export features and use scikit-learn with proper nested cross-validation.
+                </p>
+              </Card>
+            )}
           </div>
         )}
       </div>

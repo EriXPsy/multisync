@@ -229,29 +229,30 @@ function generateEpochData(
   numEpochs: number,
   epochMs: number,
   modality: ModalityType,
-  seed: number = 0
+  seed: number = 0,
+  onsetConfig?: Record<ModalityType, number>
 ): EpochDataPoint[] {
   const data: EpochDataPoint[] = [];
   
-  // Simulate cascade: neural starts first, then behavioral, then bio, then psycho
-  const onsetEpoch = {
+  // Configurable cascade onset — no assumed "correct" order
+  const defaultOnsets: Record<ModalityType, number> = {
     neural: 1,
     behavioral: 3,
     bio: 5,
     psycho: 8,
-  }[modality];
+  };
+  const onsetEpoch = (onsetConfig || defaultOnsets)[modality];
 
   const peakEpoch = Math.floor(numEpochs * 0.6);
   
   for (let i = 0; i < numEpochs; i++) {
     const t = i / numEpochs;
-    // Sigmoid onset + gaussian peak
     const onset = 1 / (1 + Math.exp(-2 * (i - onsetEpoch)));
     const peak = Math.exp(-0.5 * Math.pow((i - peakEpoch) / (numEpochs * 0.25), 2));
     const noise = (Math.sin(seed * 17 + i * 3.7) * 0.5 + Math.cos(seed * 11 + i * 2.3) * 0.3) * 0.15;
     
     const rawValue = onset * (0.3 + 0.7 * peak) + noise;
-    const value = (rawValue - 0.5) / 0.25; // z-score-ish
+    const value = (rawValue - 0.5) / 0.25;
     
     data.push({
       epochIndex: i,

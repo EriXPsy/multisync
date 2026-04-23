@@ -48,15 +48,18 @@ import {
   TrendingUp,
   Zap,
   Target,
+  Music,
 } from "lucide-react";
 import { toast } from "sonner";
 import { DEFAULT_WCC_PARAMS } from "@/lib/synchrony-data";
-import { runCascadeAnalysis } from "@/lib/cascade-analysis";
+import { runCascadeAnalysis, type CascadeReport } from "@/lib/cascade-analysis";
 import { computeWCCDirectional, normalize, epochAggregate, epochAggregateDirectional, type StreamData, type NormalizationMethod, type EpochDirectionalResult } from "@/lib/wcc-compute";
 import { runSurrogateTestBatch, type SurrogateResult } from "@/lib/surrogate-testing";
 import { runDynamicFeatureExtraction, type DynamicFeatureReport } from "@/lib/dynamic-features";
 import { runPredictionWindowAnalysis, type PredictionResult } from "@/lib/prediction-window";
 import type { Json } from "@/integrations/supabase/types";
+import ScoreViewPanel, { type ContextSegment } from "@/components/ScoreViewPanel";
+import CascadeMapPanel from "@/components/CascadeMapPanel";
 
 const STEPS = [
   { id: 1, label: "Select Data", icon: Database },
@@ -87,7 +90,9 @@ const PipelinePage = () => {
   const [analysisResults, setAnalysisResults] = useState<any>(null);
   const [alignmentReport, setAlignmentReport] = useState<any>(null);
   const [dynamicReport, setDynamicReport] = useState<DynamicFeatureReport | null>(null);
+  const [cascadeReport, setCascadeReport] = useState<CascadeReport | null>(null);
   const [predictionResult, setPredictionResult] = useState<PredictionResult | null>(null);
+  const [contextSegments, setContextSegments] = useState<ContextSegment[]>([]);
   const [running, setRunning] = useState(false);
 
   // Fetch ALL datasets
@@ -270,7 +275,8 @@ const PipelinePage = () => {
       });
 
       // Run cascade analysis
-      const cascadeReport = runCascadeAnalysis(modalityResults, epochMs);
+      const cascadeRep = runCascadeAnalysis(modalityResults, epochMs);
+      setCascadeReport(cascadeRep);
 
       // Run dynamic feature extraction
       const dynReport = runDynamicFeatureExtraction(modalityResults, epochMs);
@@ -309,7 +315,7 @@ const PipelinePage = () => {
         modalities: Object.keys(modalityResults),
         normalization,
       };
-      report.cascade = cascadeReport;
+      report.cascade = cascadeRep;
       report.surrogates = surrogateResults;
       report.dynamic = dynReport;
       report.prediction = predResult;
@@ -670,6 +676,27 @@ const PipelinePage = () => {
         {/* Step 4 */}
         {step === 4 && analysisResults && (
           <div className="space-y-4">
+            {/* Score View — Context Annotation Track */}
+            <ScoreViewPanel
+              chartData={analysisResults}
+              epochMs={epochMs}
+              segments={contextSegments}
+              onSegmentsChange={setContextSegments}
+            />
+
+            {/* Cascade Map — Modality synchrony onset chain */}
+            {cascadeReport && (
+              <CascadeMapPanel
+                onsets={cascadeReport.onsets}
+                cascadeOrder={cascadeReport.cascadeOrder}
+                leadLagMatrix={cascadeReport.leadLagMatrix}
+                grangerResults={cascadeReport.grangerResults}
+                sensitivityAnalysis={cascadeReport.sensitivityAnalysis}
+                cascadeStability={cascadeReport.cascadeStability}
+                dynamicReport={dynamicReport}
+              />
+            )}
+
             <Card className="glass-panel p-4">
               <h3 className="font-heading text-sm font-semibold mb-3">Unified Timeline — Real Data</h3>
               <ResponsiveContainer width="100%" height={350}>

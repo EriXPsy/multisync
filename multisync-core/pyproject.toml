@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "multisync-core"
+version = "0.1.0"
+description = "Dynamic process analysis for interpersonal synchrony research"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pandas>=2.0",
+    "scikit-learn>=1.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+
+[project.scripts]
+multisync = "multisync.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["multisync*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

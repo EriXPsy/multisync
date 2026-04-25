@@ -57,8 +57,12 @@ class Dyad(SynchronyDataset):
     """
 
     def __init__(self, hz: float = 1.0, **modalities: pd.DataFrame) -> None:
-        # Use a default dyad_id
-        dyad_id = modalities.pop("dyad_id", "dyad_01") if isinstance(modalities.get("dyad_id"), str) else "dyad_01"
+        # Extract dyad_id if provided as a string; otherwise use default.
+        # Always remove it from modalities to prevent add_modality() from
+        # treating it as a DataFrame.
+        dyad_id = modalities.pop("dyad_id", "dyad_01")
+        if not isinstance(dyad_id, str):
+            dyad_id = "dyad_01"
         super().__init__(dyad_id=dyad_id)
         self._default_hz = hz
         for name, df in modalities.items():
@@ -87,8 +91,8 @@ class AnalysisResults:
     cca_results: List[Dict[str, Any]] = field(default_factory=list)
     cascade_edges: List[Dict[str, Any]] = field(default_factory=list)
     cascade_graph: Dict[str, Any] = field(default_factory=dict)
-    # Prediction
-    prediction: Dict[str, Any] = field(default_factory=dict)
+    # Prediction (nested by modality pair key, e.g. "neural__behavioral")
+    prediction: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     # Context / Score view
     score_view: List[Dict[str, Any]] = field(default_factory=list)
     # Metadata
@@ -281,8 +285,15 @@ class DynamicAnalyzer:
         results.cascade_graph = {"nodes": nodes, "edges": edges_data}
 
         # 3. Prediction window analysis
+        # CRITICAL: WCC[t] uses raw data x[t:t+window_size], so it "sees"
+        # window_size-1 samples into the future.  The prediction gap must
+        # be >= window_size to prevent feature-label data leakage.
+        effective_gap = max(self.prediction_gap, self.window_size)
         names = dataset.modality_names
         feat_cols = dataset.feature_columns
+
+        # Cache WCC sequences for score view (#4 fix) and reuse
+        wcc_cache: Dict[str, np.ndarray] = {}
         for i, name_a in enumerate(names):
             for name_b in names[i + 1:]:
                 for col_a in feat_cols[name_a]:
@@ -294,15 +305,20 @@ class DynamicAnalyzer:
                         wcc = sliding_window_wcc(
                             x, y, self.window_size, hz
                         )
+                        pred_key = f"{name_a}_{col_a}__{name_b}_{col_b}"
+                        wcc_cache[pred_key] = wcc
+
                         pred = rolling_origin_cv(
                             wcc,
                             window_size=self.prediction_window,
                             horizon=self.prediction_horizon,
                             n_splits=5,
-                            gap=self.prediction_gap,
+                            gap=effective_gap,
                         )
                         if pred.folds:
-                            results.prediction = {
+                            # Fix #3: Use nested dict to avoid overwriting
+                            # across modality pairs
+                            results.prediction[pred_key] = {
                                 "modality_a": name_a,
                                 "modality_b": name_b,
                                 "mean_dynamic_auc": pred.mean_dynamic_auc,
@@ -322,19 +338,31 @@ class DynamicAnalyzer:
                             }
 
         # 4. Score view (context-based synchrony summaries)
+        # Fix #4: Compute LOCAL mean WCC per context slice, not global mean.
         if dataset.context_labels:
             t_vec = dataset.time_vector()
+            wcc_offset = (self.window_size - 1) / (2.0 * hz)
             for ctx in dataset.context_labels:
                 mask = (t_vec >= ctx.start_sec) & (t_vec < ctx.end_sec)
                 if not mask.any():
                     continue
-                # Average WCC during this context window
-                sync_vals = []
-                for key, feat in feat_dict.items():
-                    # Use mean_synchrony as aggregate
-                    if not np.isnan(feat.mean_synchrony):
-                        sync_vals.append(feat.mean_synchrony)
-                mean_sync = float(np.mean(sync_vals)) if sync_vals else 0.0
+                # Map the time-based mask to WCC indices.
+                # WCC index i corresponds to the window starting at t_vec[i].
+                # The window spans [t_vec[i], t_vec[i] + window_size/hz).
+                wcc_indices = np.where(mask)[0]
+                local_sync_vals = []
+                for key, wcc in wcc_cache.items():
+                    # Only use WCC indices that fall within valid WCC range
+                    valid_idx = wcc_indices[
+                        (wcc_indices >= 0) & (wcc_indices < len(wcc))
+                    ]
+                    if len(valid_idx) == 0:
+                        continue
+                    local_wcc = wcc[valid_idx]
+                    local_mean = np.nanmean(local_wcc)
+                    if not np.isnan(local_mean):
+                        local_sync_vals.append(local_mean)
+                mean_sync = float(np.mean(local_sync_vals)) if local_sync_vals else 0.0
                 results.score_view.append({
                     "start_sec": ctx.start_sec,
                     "end_sec": ctx.end_sec,

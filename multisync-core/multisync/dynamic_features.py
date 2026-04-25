@@ -196,7 +196,7 @@ def extract_dynamic_features(
     peak_time = peak_idx * dt
 
     # --- Build-up ---
-    if onset_idx < peak_idx and onset_latency is not np.nan:
+    if onset_idx < peak_idx and not np.isnan(onset_latency):
         build_up_duration = (peak_idx - onset_idx) * dt
         build_up_rate = (peak_amplitude - onset_amplitude) / build_up_duration if build_up_duration > 0 else 0.0
         # Linear slope during build-up window

@@ -100,15 +100,15 @@ def _prft_surrogate(
         random_phases[n // 2] = phases[n // 2]
 
     # Enforce Hermitian symmetry: X[k] = conj(X[n-k])
-    # For real-valued signal, we only randomize the first half (excluding Nyquist)
+    # For real-valued signal, we only randomize the first half (including Nyquist)
     X_new = np.zeros_like(X)
-    half = n // 2 + (1 if n % 2 else 0)
+    half = n // 2 + 1  # include Nyquist for even n
     for k in range(half):
         magnitude = np.abs(X[k])
         new_phase = random_phases[k]
         X_new[k] = magnitude * np.exp(1j * new_phase)
-        if k > 0 and k < n // 2:
-            # Mirror frequency
+        if k > 0 and k < n - k:
+            # Mirror frequency (skip when k == n-k, i.e., Nyquist for even n)
             X_new[n - k] = np.conj(X_new[k])
 
     surrogate = np.real(ifft(X_new))
@@ -256,12 +256,21 @@ def cascade_analysis(
                     if x is None or y is None:
                         continue
 
-                    # Remove NaN-padded edges
-                    valid = ~(np.isnan(x) | np.isnan(y))
-                    if valid.sum() < 20:
+                    # Trim leading and trailing NaN only — never slice internal gaps.
+                    # Internal NaN → fill with 0 (zero contribution to correlation).
+                    either_nan = np.isnan(x) | np.isnan(y)
+                    if either_nan.sum() == len(x):
+                        continue  # entirely NaN
+                    # Find first/last valid index to trim edges
+                    first_valid = int(np.argmax(~either_nan))
+                    last_valid = len(either_nan) - 1 - int(np.argmax(~either_nan[::-1]))
+                    x_trim = x[first_valid : last_valid + 1].copy()
+                    y_trim = y[first_valid : last_valid + 1].copy()
+                    if len(x_trim) < 20:
                         continue
-                    x_clean = x[valid]
-                    y_clean = y[valid]
+                    # Fill internal NaN with 0 (preserves length, no time-axis collapse)
+                    x_clean = np.where(np.isnan(x_trim), 0.0, x_trim)
+                    y_clean = np.where(np.isnan(y_trim), 0.0, y_trim)
 
                     # Compute observed CCF
                     lags_sec, ccf_vals = compute_ccf(

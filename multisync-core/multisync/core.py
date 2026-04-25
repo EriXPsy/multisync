@@ -32,9 +32,10 @@ from .dynamic_features import (
     DynamicFeatures,
     extract_dynamic_features,
     extract_features_all_pairs,
+    extract_features_segmented,
     sliding_window_wcc,
 )
-from .prediction import FoldResult, PredictionResult, rolling_origin_cv
+from .prediction import FoldResult, PredictionResult, rolling_origin_cv, cross_modal_prediction
 
 
 # ---------------------------------------------------------------------------
@@ -85,14 +86,18 @@ class Dyad(SynchronyDataset):
 class AnalysisResults:
     """Complete analysis output — ready for Viewer JSON export."""
     dyad_id: str
-    # Dynamic features
+    # Dynamic features (global, per pair)
     dynamic_features: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    # Dynamic features (segmented by context)
+    dynamic_features_segmented: Dict[str, Dict[str, Dict[str, float]]] = field(default_factory=dict)
     # Cascade
     cca_results: List[Dict[str, Any]] = field(default_factory=list)
     cascade_edges: List[Dict[str, Any]] = field(default_factory=list)
     cascade_graph: Dict[str, Any] = field(default_factory=dict)
     # Prediction (nested by modality pair key, e.g. "neural__behavioral")
     prediction: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # Cross-modal prediction (source_pair → target_pair)
+    cross_modal_prediction: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     # Context / Score view
     score_view: List[Dict[str, Any]] = field(default_factory=list)
     # Metadata
@@ -100,11 +105,13 @@ class AnalysisResults:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "schema_version": "0.1.0",
+            "schema_version": "0.2.0",
             "dyad_id": self.dyad_id,
             "dynamic_features": self.dynamic_features,
+            "dynamic_features_segmented": self.dynamic_features_segmented,
             "cascade_graph": self.cascade_graph,
             "prediction": self.prediction,
+            "cross_modal_prediction": self.cross_modal_prediction,
             "score_view": self.score_view,
             "parameters": self.parameters,
         }
@@ -215,11 +222,13 @@ class DynamicAnalyzer:
         Run the complete analysis pipeline on an aligned+normalized dataset.
 
         Steps:
-        1. WCC + 10 dynamic features for each modality pair.
-        2. Cascade analysis (CCF + PRTF surrogate testing).
-        3. Prediction window analysis (Rolling Origin CV).
-        4. Score view (context-based synchrony summaries).
-        5. Package everything into AnalysisResults.
+        1. WCC + 10 dynamic features for each modality pair (global).
+        2. WCC + 10 dynamic features segmented by context (if contexts exist).
+        3. Cascade analysis (CCF + PRTF surrogate testing).
+        4. Prediction window analysis (Rolling Origin CV with dynamic features).
+        5. Cross-modal prediction (if 3+ modalities: source pair → target pair).
+        6. Score view (context-based synchrony summaries).
+        7. Package everything into AnalysisResults.
 
         Parameters
         ----------
@@ -247,11 +256,14 @@ class DynamicAnalyzer:
                 "alpha": self.alpha,
                 "seed": self.seed,
                 "onset_threshold": self.onset_threshold,
+                "prediction_window": self.prediction_window,
+                "prediction_horizon": self.prediction_horizon,
+                "prediction_gap": self.prediction_gap,
                 "hz": hz,
             },
         )
 
-        # 1. Dynamic features
+        # 1. Dynamic features (global)
         feat_dict = extract_features_all_pairs(
             dataset,
             window_size=self.window_size,
@@ -260,7 +272,20 @@ class DynamicAnalyzer:
         )
         results.dynamic_features = {k: v.to_dict() for k, v in feat_dict.items()}
 
-        # 2. Cascade analysis (CCF + PRTF surrogates)
+        # 2. Dynamic features (context-segmented)
+        if dataset.context_labels:
+            seg_dict = extract_features_segmented(
+                dataset,
+                window_size=self.window_size,
+                hz=hz,
+                onset_threshold=self.onset_threshold,
+            )
+            results.dynamic_features_segmented = {
+                label: {pair: feat.to_dict() for pair, feat in pairs.items()}
+                for label, pairs in seg_dict.items()
+            }
+
+        # 3. Cascade analysis (CCF + PRTF surrogates)
         cca_results, cascade_edges = cascade_analysis(
             dataset,
             max_lag_sec=self.max_lag_sec,
@@ -303,15 +328,15 @@ class DynamicAnalyzer:
         ]
         results.cascade_graph = {"nodes": nodes, "edges": edges_data}
 
-        # 3. Prediction window analysis
-        # CRITICAL: WCC[t] uses raw data x[t:t+window_size], so it "sees"
-        # window_size-1 samples into the future.  The prediction gap must
-        # be >= window_size to prevent feature-label data leakage.
-        effective_gap = max(self.prediction_gap, self.window_size)
+        # 4. Prediction window analysis (dynamic features, not raw WCC)
+        # Use a larger window for feature extraction (need enough data
+        # within each window to compute meaningful dynamic features).
+        pred_window = max(self.prediction_window, 30)
+
         names = dataset.modality_names
         feat_cols = dataset.feature_columns
 
-        # Cache WCC sequences for score view (#4 fix) and reuse
+        # Cache WCC sequences for score view (#6) and reuse
         wcc_cache: Dict[str, np.ndarray] = {}
         for i, name_a in enumerate(names):
             for name_b in names[i + 1:]:
@@ -329,22 +354,24 @@ class DynamicAnalyzer:
 
                         pred = rolling_origin_cv(
                             wcc,
-                            window_size=self.prediction_window,
-                            horizon=self.prediction_horizon,
+                            window_size=pred_window,
+                            hz=hz,
                             n_splits=5,
-                            gap=effective_gap,
+                            gap=max(self.prediction_gap, pred_window // 2),
+                            pair_name=pred_key,
+                            mode="intra",
                         )
                         if pred.folds:
-                            # Fix #3: Use nested dict to avoid overwriting
-                            # across modality pairs
                             results.prediction[pred_key] = {
                                 "modality_a": name_a,
                                 "modality_b": name_b,
+                                "mode": "intra",
                                 "mean_dynamic_auc": pred.mean_dynamic_auc,
                                 "mean_baseline_auc": pred.mean_baseline_auc,
                                 "mean_delta_auc": pred.mean_delta_auc,
                                 "feature_importance": pred.feature_importance,
                                 "warning": pred.warning,
+                                "n_features_used": pred.n_features_used,
                                 "folds": [
                                     {
                                         "fold_id": f.fold_id,
@@ -356,8 +383,57 @@ class DynamicAnalyzer:
                                 ],
                             }
 
-        # 4. Score view (context-based synchrony summaries)
-        # Fix #4: Compute LOCAL mean WCC per context slice, not global mean.
+        # 5. Cross-modal prediction (if 3+ modalities)
+        if len(names) >= 3:
+            # Try all ordered source→target combinations
+            all_pairs = []
+            for i, name_a in enumerate(names):
+                for name_b in names[i + 1:]:
+                    for col_a in feat_cols[name_a]:
+                        for col_b in feat_cols[name_b]:
+                            src_key = f"{name_a}_{col_a}__{name_b}_{col_b}"
+                            if src_key in wcc_cache:
+                                all_pairs.append((src_key, name_a, name_b))
+
+            for idx_a, (src_key, src_a, src_b) in enumerate(all_pairs):
+                for idx_b, (tgt_key, tgt_a, tgt_b) in enumerate(all_pairs):
+                    if idx_a == idx_b:
+                        continue  # skip same pair
+                    if src_key in wcc_cache and tgt_key in wcc_cache:
+                        cm_pred = cross_modal_prediction(
+                            source_wcc=wcc_cache[src_key],
+                            target_wcc=wcc_cache[tgt_key],
+                            window_size=pred_window,
+                            hz=hz,
+                            n_splits=3,  # fewer folds for speed
+                            gap=max(self.prediction_gap, pred_window // 2),
+                            source_name=src_key,
+                            target_name=tgt_key,
+                        )
+                        if cm_pred.folds:
+                            cm_key = f"{src_key} -> {tgt_key}"
+                            results.cross_modal_prediction[cm_key] = {
+                                "source_pair": src_key,
+                                "target_pair": tgt_key,
+                                "mode": "cross_modal",
+                                "mean_dynamic_auc": cm_pred.mean_dynamic_auc,
+                                "mean_baseline_auc": cm_pred.mean_baseline_auc,
+                                "mean_delta_auc": cm_pred.mean_delta_auc,
+                                "feature_importance": cm_pred.feature_importance,
+                                "warning": cm_pred.warning,
+                                "n_features_used": cm_pred.n_features_used,
+                                "folds": [
+                                    {
+                                        "fold_id": f.fold_id,
+                                        "dynamic_auc": f.dynamic_auc,
+                                        "baseline_auc": f.baseline_auc,
+                                        "delta_auc": f.delta_auc,
+                                    }
+                                    for f in cm_pred.folds
+                                ],
+                            }
+
+        # 6. Score view (context-based synchrony summaries)
         if dataset.context_labels:
             t_vec = dataset.time_vector()
             wcc_offset = (self.window_size - 1) / (2.0 * hz)
@@ -366,8 +442,6 @@ class DynamicAnalyzer:
                 if not mask.any():
                     continue
                 # Map the time-based mask to WCC indices.
-                # WCC index i corresponds to the window starting at t_vec[i].
-                # The window spans [t_vec[i], t_vec[i] + window_size/hz).
                 wcc_indices = np.where(mask)[0]
                 local_sync_vals = []
                 for key, wcc in wcc_cache.items():

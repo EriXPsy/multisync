@@ -15,7 +15,10 @@ via Hanning window where appropriate.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    from .dataset import SynchronyDataset
 
 import numpy as np
 from scipy import signal as sp_signal
@@ -319,5 +322,99 @@ def extract_features_all_pairs(
                     feat = extract_dynamic_features(wcc, hz, onset_threshold)
                     key = f"{name_a}_{col_a}__{name_b}_{col_b}"
                     results[key] = feat
+
+    return results
+
+
+def extract_features_segmented(
+    dataset: "SynchronyDataset",  # noqa: F821
+    window_size: int = 10,
+    hz: float = 1.0,
+    onset_threshold: float = 0.2,
+) -> Dict[str, Dict[str, DynamicFeatures]]:
+    """
+    Compute WCC + dynamic features per CONTEXT segment.
+
+    When a dataset has context labels (e.g., "Rest", "Task", "Cooperation"),
+    this function extracts features separately for each context window.
+    This enables context-sliced comparison: "Does cooperation have a faster
+    build-up rate than rest?"
+
+    Parameters
+    ----------
+    dataset : SynchronyDataset
+        Must be aligned, normalized, and have context_labels set.
+        If no context labels, falls back to a single "full" segment.
+    window_size : int
+        WCC window size in samples.
+    hz : float
+        Sampling rate.
+    onset_threshold : float
+        WCC threshold for onset detection.
+
+    Returns
+    -------
+    dict mapping context_label → {"modA_modB": DynamicFeatures, ...}
+    If no contexts defined, returns {"full": {pair_key: DynamicFeatures}}.
+    """
+    feat_cols = dataset.feature_columns
+    names = dataset.modality_names
+    t_vec = dataset.time_vector()
+
+    # Define segments from context labels
+    segments: List[Tuple[str, float, float]] = []
+    if dataset.context_labels:
+        for ctx in dataset.context_labels:
+            segments.append((ctx.label, ctx.start_sec, ctx.end_sec))
+    else:
+        if len(t_vec) > 0:
+            segments.append(("full", t_vec[0], t_vec[-1]))
+
+    if not segments:
+        return {}
+
+    # Build segment masks (time-based → sample-index-based)
+    results: Dict[str, Dict[str, DynamicFeatures]] = {}
+
+    for label, start_sec, end_sec in segments:
+        mask = (t_vec >= start_sec) & (t_vec < end_sec)
+        if mask.sum() < window_size + 5:
+            # Segment too short for meaningful feature extraction
+            results[label] = {}
+            continue
+
+        seg_results: Dict[str, DynamicFeatures] = {}
+        for i, name_a in enumerate(names):
+            for name_b in names[i + 1:]:
+                for col_a in feat_cols[name_a]:
+                    for col_b in feat_cols[name_b]:
+                        x = dataset.get_aligned_array(name_a, col_a)
+                        y = dataset.get_aligned_array(name_b, col_b)
+                        if x is None or y is None:
+                            continue
+
+                        # Slice to segment
+                        x_seg = x[mask]
+                        y_seg = y[mask]
+
+                        # Skip if segment has too many NaNs
+                        valid_ratio = (
+                            ~np.isnan(x_seg) & ~np.isnan(y_seg)
+                        ).sum() / len(x_seg)
+                        if valid_ratio < 0.5:
+                            continue
+
+                        wcc = sliding_window_wcc(
+                            x_seg, y_seg, window_size, hz
+                        )
+                        if len(wcc) < 5:
+                            continue
+                        feat = extract_dynamic_features(
+                            wcc, hz, onset_threshold
+                        )
+                        key = f"{name_a}_{col_a}__{name_b}_{col_b}"
+                        seg_results[key] = feat
+
+        results[label] = seg_results
 
     return results

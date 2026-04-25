@@ -298,17 +298,54 @@ class TestPrediction:
     def test_rolling_origin_cv_basic(self):
         from multisync.prediction import rolling_origin_cv
         np.random.seed(42)
+        # Create a WCC-like series with clear high/low regions
+        # Need enough data for feature extraction: 8 blocks of 50 = 400 samples
         series = np.concatenate([
-            np.full(40, -1.0),
-            np.full(40, 1.0),
-            np.full(40, -1.0),
-            np.full(40, 1.0),
-            np.full(40, -1.0),
-            np.full(40, 1.0),
+            np.full(50, -1.0),
+            np.full(50, 1.0),
+            np.full(50, -1.0),
+            np.full(50, 1.0),
+            np.full(50, -1.0),
+            np.full(50, 1.0),
+            np.full(50, -1.0),
+            np.full(50, 1.0),
         ])
-        pred = rolling_origin_cv(series, window_size=5, horizon=5, n_splits=5, gap=5)
+        pred = rolling_origin_cv(
+            series, window_size=20, hz=1.0, n_splits=3, gap=2
+        )
         assert len(pred.folds) > 0
         assert 0 <= pred.mean_dynamic_auc <= 1
+        assert pred.mode == "intra"
+        assert pred.n_features_used >= 0
+
+    def test_dynamic_feature_matrix_not_autoregressive(self):
+        """
+        Verify that the prediction module now uses dynamic features,
+        not raw WCC values. Feature importance keys should be dynamic
+        feature names, not lag_1, lag_2, etc.
+        """
+        from multisync.prediction import rolling_origin_cv
+        np.random.seed(42)
+        series = np.concatenate([
+            np.full(30, -1.0),
+            np.full(30, 1.0),
+            np.full(30, -1.0),
+            np.full(30, 1.0),
+            np.full(30, -1.0),
+            np.full(30, 1.0),
+            np.full(30, -1.0),
+            np.full(30, 1.0),
+        ])
+        pred = rolling_origin_cv(
+            series, window_size=20, hz=1.0, n_splits=3, gap=5
+        )
+        # Feature importance keys should be dynamic feature names
+        if pred.feature_importance:
+            for key in pred.feature_importance:
+                assert not key.startswith("lag_"), (
+                    f"Feature key '{key}' looks like raw WCC lag, "
+                    f"not a dynamic feature name"
+                )
 
     def test_leakage_audit_autocorrelated(self):
         """
@@ -324,10 +361,10 @@ class TestPrediction:
 
         pred = rolling_origin_cv(
             sine_wave,
-            window_size=10,
-            horizon=5,
+            window_size=30,
+            hz=1.0,
             n_splits=5,
-            gap=5,
+            gap=15,
         )
         # The warning flag should catch suspicious performance
         if pred.mean_delta_auc > 0.4:
@@ -337,10 +374,33 @@ class TestPrediction:
         """Random noise should give AUC near 0.5."""
         from multisync.prediction import rolling_origin_cv
         np.random.seed(42)
-        noise = np.random.randn(300)
-        pred = rolling_origin_cv(noise, window_size=5, horizon=5, n_splits=3, gap=3)
+        # Need enough samples for feature extraction
+        noise = np.random.randn(500)
+        pred = rolling_origin_cv(
+            noise, window_size=20, hz=1.0, n_splits=3, gap=2
+        )
         # Random noise → AUC should be near 0.5
         assert abs(pred.mean_dynamic_auc - 0.5) < 0.2
+
+    def test_cross_modal_prediction_basic(self):
+        """Cross-modal prediction: source and target are independent signals."""
+        from multisync.prediction import cross_modal_prediction
+        np.random.seed(42)
+        # Source: has structure (sine wave)
+        t = np.arange(300, dtype=float)
+        source = np.sin(2 * np.pi * t / 50) + np.random.randn(300) * 0.3
+        # Target: different structure (square wave)
+        target = np.sign(np.sin(2 * np.pi * t / 30)) + np.random.randn(300) * 0.3
+
+        pred = cross_modal_prediction(
+            source, target,
+            window_size=30, hz=1.0,
+            source_name="behavioral__neural",
+            target_name="neural__bio",
+        )
+        assert pred.mode == "cross_modal"
+        assert pred.source_pair == "behavioral__neural"
+        assert pred.target_pair == "neural__bio"
 
     def test_lodo_basic(self):
         from multisync.prediction import lodo_cv
@@ -483,7 +543,9 @@ class TestHighLevelAPI:
         assert "dyad_id" in d
         assert "cascade_graph" in d
         assert "dynamic_features" in d
+        assert "dynamic_features_segmented" in d
         assert "prediction" in d
+        assert "cross_modal_prediction" in d
         assert "parameters" in d
 
         # Cascade graph has correct structure
@@ -497,8 +559,63 @@ class TestHighLevelAPI:
             assert "p_value" in edge
             assert "is_significant" in edge
 
-        # JSON schema_version present
+        # JSON schema_version present (updated to 0.2.0)
         assert "schema_version" in d
+        assert d["schema_version"] == "0.2.0"
+
+    def test_context_segmented_features(self):
+        """When contexts are defined, dynamic features should be computed
+        per-context, not just globally."""
+        import multisync as ms
+        np.random.seed(42)
+        n = 300
+        t = np.arange(n, dtype=float)
+        df_a = pd.DataFrame({
+            "time": t,
+            "val": np.sin(2 * np.pi * t / 50) + np.random.randn(n) * 0.2,
+        })
+        df_b = pd.DataFrame({
+            "time": t,
+            "val": np.cos(2 * np.pi * t / 50) + np.random.randn(n) * 0.2,
+        })
+
+        dyad = ms.Dyad(a=df_a, b=df_b, hz=1.0)
+        dyad.add_context(0, 150, "Phase1")
+        dyad.add_context(150, 300, "Phase2")
+        dyad.align(target_hz=1.0)
+        dyad.zscore()
+
+        analyzer = ms.DynamicAnalyzer(surrogate_n=10, window_size=10)
+        results = analyzer.fit_transform(dyad)
+
+        # Should have segmented features
+        assert "dynamic_features_segmented" in results.to_dict()
+        seg = results.dynamic_features_segmented
+        assert "Phase1" in seg
+        assert "Phase2" in seg
+        # Each segment should have at least one pair's features
+        assert len(seg["Phase1"]) > 0
+        assert len(seg["Phase2"]) > 0
+
+    def test_prediction_uses_dynamic_features_not_raw_wcc(self):
+        """High-level test: verify that prediction results now report
+        dynamic feature importance (not raw WCC lag coefficients)."""
+        import multisync as ms
+        ds = ms.generate_ground_truth_dyad(
+            duration_sec=300, noise_ratio=0.2,
+        )
+        ds.align(target_hz=1.0)
+        ds.zscore()
+        analyzer = ms.DynamicAnalyzer(surrogate_n=10, window_size=10)
+        results = analyzer.fit_transform(ds)
+
+        for key, pred in results.prediction.items():
+            # Feature importance should use dynamic feature names
+            if pred.get("feature_importance"):
+                for feat_name in pred["feature_importance"]:
+                    assert not feat_name.startswith("lag_"), (
+                        f"Prediction {key} still uses raw WCC features: {feat_name}"
+                    )
 
 
 # ===========================================================================
@@ -595,6 +712,73 @@ class TestMultimodalSynthetic:
         lags, ccf = compute_ccf(x_v, y_v, max_lag_sec=20.0, hz=1.0, apply_window=False)
         # With shared bursts, peak CCF should be meaningfully above zero
         assert np.max(np.abs(ccf)) > 0.05
+
+    def test_divergent_morphology_stress(self):
+        """Divergent morphology should still allow CCF to detect direction,
+        though peak CCF will be lower than identical morphology."""
+        from multisync.synthetic import generate_ground_truth_dyad
+        from multisync.cascade import compute_ccf
+
+        ds = generate_ground_truth_dyad(
+            lead_modality="behavior",
+            lag_modality="neural",
+            true_lag_sec=12.0,
+            noise_ratio=0.3,
+            duration_sec=300,
+            hz=1.0,
+            seed=42,
+            morphology="divergent",
+        )
+        ds.align(target_hz=1.0)
+        ds.zscore()
+
+        x = ds.get_aligned_array("behavior", "value")
+        y = ds.get_aligned_array("neural", "value")
+        valid = ~np.isnan(x) & ~np.isnan(y)
+        x_v, y_v = x[valid], y[valid]
+
+        lags, ccf = compute_ccf(x_v, y_v, max_lag_sec=25.0, hz=1.0)
+        peak_idx = np.argmax(np.abs(ccf))
+        detected_lag = lags[peak_idx]
+
+        # Direction should still be detected (behavior leads neural)
+        assert detected_lag < -3, (
+            f"Divergent morphology: expected negative lag (behavior leads), "
+            f"got {detected_lag:.1f}s"
+        )
+
+    def test_identical_vs_divergent_peak_differs(self):
+        """Identical morphology should give higher peak CCF than divergent
+        for the same parameters."""
+        from multisync.synthetic import generate_ground_truth_dyad
+        from multisync.cascade import compute_ccf
+
+        ds_id = generate_ground_truth_dyad(
+            true_lag_sec=12.0, noise_ratio=0.2, seed=42,
+            morphology="identical",
+        )
+        ds_dv = generate_ground_truth_dyad(
+            true_lag_sec=12.0, noise_ratio=0.2, seed=42,
+            morphology="divergent",
+        )
+        ds_id.align(target_hz=1.0)
+        ds_id.zscore()
+        ds_dv.align(target_hz=1.0)
+        ds_dv.zscore()
+
+        def _get_peak_ccf(ds):
+            x = ds.get_aligned_array("behavior", "value")
+            y = ds.get_aligned_array("neural", "value")
+            v = ~np.isnan(x) & ~np.isnan(y)
+            _, ccf = compute_ccf(x[v], y[v], max_lag_sec=25.0, hz=1.0)
+            return np.max(np.abs(ccf))
+
+        peak_id = _get_peak_ccf(ds_id)
+        peak_dv = _get_peak_ccf(ds_dv)
+        # Identical morphology should give higher peak (same waveform shifted)
+        assert peak_id >= peak_dv, (
+            f"Identical peak {peak_id:.3f} should be >= divergent peak {peak_dv:.3f}"
+        )
 
 
 # ===========================================================================

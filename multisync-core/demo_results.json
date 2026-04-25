@@ -1,0 +1,94 @@
+{
+  "schema_version": "0.2.0",
+  "dyad_id": "synthetic_lag12.0s_noise0.3_identical",
+  "dynamic_features": {
+    "behavior_value__neural_value": {
+      "onset_latency": 5.0,
+      "onset_amplitude": 0.2941631659360008,
+      "build_up_rate": 0.003680033556582212,
+      "build_up_slope": -4.595909419331265e-05,
+      "peak_amplitude": 0.7872876625180172,
+      "peak_duration": 26.0,
+      "breakdown_rate": 0.0009895957697293027,
+      "recovery_time": 9.0,
+      "mean_synchrony": -0.04645406782327369,
+      "synchrony_entropy": 2.2749405123753044
+    }
+  },
+  "dynamic_features_segmented": {
+    "PreTask": {
+      "behavior_value__neural_value": {
+        "onset_latency": 5.0,
+        "onset_amplitude": 0.2941631659360008,
+        "build_up_rate": 0.003680033556582212,
+        "build_up_slope": -4.595909419331265e-05,
+        "peak_amplitude": 0.7872876625180172,
+        "peak_duration": 12.0,
+        "breakdown_rate": 0.038335727500609436,
+        "recovery_time": 1.0,
+        "mean_synchrony": -0.02672427911725108,
+        "synchrony_entropy": 2.269671586846727
+      }
+    },
+    "Task": {
+      "behavior_value__neural_value": {
+        "onset_latency": 6.0,
+        "onset_amplitude": 0.2998431589204841,
+        "build_up_rate": 0.004931208355810628,
+        "build_up_slope": -0.0031625424242775857,
+        "peak_amplitude": 0.7831015777899256,
+        "peak_duration": 11.0,
+        "breakdown_rate": 0.019694553838003812,
+        "recovery_time": 8.0,
+        "mean_synchrony": -0.09933341854265941,
+        "synchrony_entropy": 2.25106606488838
+      }
+    }
+  },
+  "cascade_graph": {
+    "nodes": [
+      "neural",
+      "behavior"
+    ],
+    "edges": [
+      {
+        "from": "behavior",
+        "to": "neural",
+        "lag_sec": 12.0,
+        "ccf_value": 0.48398708081608777,
+        "p_value": 0.0,
+        "is_significant": true
+      }
+    ]
+  },
+  "prediction": {},
+  "cross_modal_prediction": {},
+  "score_view": [
+    {
+      "start_sec": 0,
+      "end_sec": 150,
+      "label": "PreTask",
+      "score": 0.0,
+      "mean_sync": 0.0032525218529489072
+    },
+    {
+      "start_sec": 150,
+      "end_sec": 300,
+      "label": "Task",
+      "score": 0.0,
+      "mean_sync": -0.09933341854265941
+    }
+  ],
+  "parameters": {
+    "window_size": 10,
+    "surrogate_n": 20,
+    "max_lag_sec": 30.0,
+    "alpha": 0.05,
+    "seed": 42,
+    "onset_threshold": 0.2,
+    "prediction_window": 10,
+    "prediction_horizon": 5,
+    "prediction_gap": 5,
+    "hz": 1.0
+  }
+}

@@ -32,11 +32,18 @@ from .dynamic_features import (
     sliding_window_wcc,
     extract_dynamic_features,
     extract_features_all_pairs,
+    extract_features_segmented,
     DynamicFeatures,
 )
 
 # Prediction
-from .prediction import rolling_origin_cv, lodo_cv, PredictionResult, FoldResult
+from .prediction import (
+    rolling_origin_cv,
+    cross_modal_prediction,
+    lodo_cv,
+    PredictionResult,
+    FoldResult,
+)
 
 # Synthetic data
 from .synthetic import generate_ground_truth_dyad, generate_multimodal_dyad
@@ -58,9 +65,11 @@ __all__ = [
     "sliding_window_wcc",
     "extract_dynamic_features",
     "extract_features_all_pairs",
+    "extract_features_segmented",
     "DynamicFeatures",
     # Prediction
     "rolling_origin_cv",
+    "cross_modal_prediction",
     "lodo_cv",
     "PredictionResult",
     "FoldResult",

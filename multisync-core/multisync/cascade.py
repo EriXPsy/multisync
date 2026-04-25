@@ -272,9 +272,17 @@ def cascade_analysis(
                     x_clean = np.where(np.isnan(x_trim), 0.0, x_trim)
                     y_clean = np.where(np.isnan(y_trim), 0.0, y_trim)
 
+                    # Cap max_lag_sec to the mathematically feasible range for
+                    # this particular segment.  CCF needs n >= 2*max_lag + 1,
+                    # so max_lag <= (n-1)//2.  Silently cap instead of crashing.
+                    n_seg = len(x_clean)
+                    feasible_lag_samples = (n_seg - 1) // 2
+                    feasible_lag_sec = feasible_lag_samples / hz
+                    effective_max_lag = min(max_lag_sec, feasible_lag_sec)
+
                     # Compute observed CCF
                     lags_sec, ccf_vals = compute_ccf(
-                        x_clean, y_clean, max_lag_sec, hz, apply_window
+                        x_clean, y_clean, effective_max_lag, hz, apply_window
                     )
 
                     # Find peak
@@ -302,7 +310,7 @@ def cascade_analysis(
                         x_surr = _prft_surrogate(x_clean, rng)
                         y_surr = _prft_surrogate(y_clean, rng)
                         _, ccf_s = compute_ccf(
-                            x_surr, y_surr, max_lag_sec, hz, apply_window
+                            x_surr, y_surr, effective_max_lag, hz, apply_window
                         )
                         null_peaks[s] = np.max(np.abs(ccf_s))
 

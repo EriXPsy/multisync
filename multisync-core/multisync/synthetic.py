@@ -150,16 +150,18 @@ def generate_multimodal_dyad(
 
     rng = np.random.default_rng(seed)
 
+    # Shared burst times — all modalities use the SAME temporal anchors
+    # so that cross-modality synchrony is genuinely present in Ground Truth.
+    # Each modality then applies a fixed offset to simulate lead-lag.
+    shared_bursts = rng.uniform(20, duration_sec - 40, size=5)
+
     dataframes = {}
     for name, orig_hz in modalities.items():
         n = int(duration_sec * orig_hz)
         t = np.arange(n) / orig_hz
 
-        # Each modality gets a correlated signal with slight timing offsets
-        # Neural is the "base", behavior leads by ~5s, bio leads by ~3s
-        base_bursts = rng.uniform(20, duration_sec - 40, size=5)
         signal = np.zeros(n)
-        for bt in base_bursts:
+        for bt in shared_bursts:
             # Offset each modality
             offset = {"neural": 0, "behavior": -5, "bio": -3}.get(name, 0)
             signal += np.exp(-0.5 * ((t - bt - offset) / 3.0) ** 2)

@@ -59,7 +59,9 @@ def sliding_window_wcc(
     if len(y) != n:
         raise ValueError(f"x and y must have same length: {n} vs {len(y)}")
     if window_size > n:
-        raise ValueError(f"window_size ({window_size}) > series length ({n})")
+        # Graceful fallback: return empty array.  Downstream feature
+        # extraction already handles empty arrays (returns NaN features).
+        return np.array([], dtype=float)
 
     # Apply lag
     if lag_samples > 0:
@@ -191,8 +193,13 @@ def extract_dynamic_features(
         onset_amplitude = np.nan
 
     # --- Peak ---
-    peak_idx = int(np.argmax(wcc_clean))
-    peak_amplitude = float(wcc_clean[peak_idx])
+    # Use -inf to fill NaN positions so they can NEVER be selected as peak.
+    # This prevents zero-padded NaN slots from creating false peaks when
+    # all valid WCC values are negative.
+    wcc_valid_only = wcc.copy()
+    wcc_valid_only[~valid] = -np.inf
+    peak_idx = int(np.argmax(wcc_valid_only))
+    peak_amplitude = float(wcc_valid_only[peak_idx])
     peak_time = peak_idx * dt
 
     # --- Build-up ---
@@ -212,9 +219,12 @@ def extract_dynamic_features(
         build_up_slope = 0.0
 
     # --- Peak duration (time above 75% of peak) ---
-    threshold_75 = 0.75 * peak_amplitude
-    above_75 = wcc_clean >= threshold_75
-    peak_duration = float(np.sum(above_75) * dt)
+    if peak_amplitude > 0:
+        threshold_75 = 0.75 * peak_amplitude
+        above_75 = wcc_clean >= threshold_75
+        peak_duration = float(np.sum(above_75) * dt)
+    else:
+        peak_duration = 0.0
 
     # --- Breakdown ---
     if peak_idx < len(wcc_clean) - 1:

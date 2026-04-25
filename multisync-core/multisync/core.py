@@ -100,6 +100,7 @@ class AnalysisResults:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "schema_version": "0.1.0",
             "dyad_id": self.dyad_id,
             "dynamic_features": self.dynamic_features,
             "cascade_graph": self.cascade_graph,
@@ -118,6 +119,7 @@ class AnalysisResults:
 
         Schema:
         {
+            "schema_version": "0.1.0",
             "dyad_id": "pair_01",
             "cascade_graph": {
                 "nodes": ["Behavior", "Neural"],
@@ -126,16 +128,33 @@ class AnalysisResults:
                            "p_value": 0.003}]
             },
             "dynamic_features": {"behavior__neural": {...}},
-            "prediction": {"mean_delta_auc": 0.15, "folds": [...]},
+            "prediction": {"neural_behavioral": {...}},
             "score_view": [{"start_sec": 0, "end_sec": 300,
                            "label": "Task", "mean_sync": 0.45}]
         }
         """
         d = self.to_dict()
+
+        # Replace NaN/Inf with None (JSON null) before serialization.
+        # Using default=str as fallback would turn NaN into the string
+        # "nan", which breaks frontend type checks (typeof === "string").
+        def _sanitize(obj: Any) -> Any:
+            if isinstance(obj, float):
+                if np.isnan(obj) or np.isinf(obj):
+                    return None
+                return obj
+            if isinstance(obj, dict):
+                return {k: _sanitize(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [_sanitize(v) for v in obj]
+            return obj
+
+        d = _sanitize(d)
+
         path = Path(filepath)
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(d, f, indent=2, default=str)
+            json.dump(d, f, indent=2)
         return str(path)
 
 

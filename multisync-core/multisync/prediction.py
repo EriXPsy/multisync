@@ -18,6 +18,10 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -81,6 +85,14 @@ def _create_binary_label(
     """
     n = len(sync_series)
     valid = ~np.isnan(sync_series)
+    nan_ratio = (~valid).sum() / n
+    if nan_ratio > 0.3:
+        logger.warning(
+            "High NaN ratio (%.1f%%) in sync_series for prediction — "
+            "model may train on imputed data. Consider handling NaNs before "
+            "calling rolling_origin_cv().",
+            nan_ratio * 100,
+        )
     sync_clean = np.where(valid, sync_series, 0.0)
 
     X_list, y_list = [], []

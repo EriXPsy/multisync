@@ -25,7 +25,6 @@ from .cascade import (
     cascade_analysis,
     CCAResult,
     CascadeEdge,
-    _prft_surrogate,
 )
 
 # Dynamic features
@@ -55,7 +54,6 @@ __all__ = [
     "cascade_analysis",
     "CCAResult",
     "CascadeEdge",
-    "_prft_surrogate",
     # Features
     "sliding_window_wcc",
     "extract_dynamic_features",

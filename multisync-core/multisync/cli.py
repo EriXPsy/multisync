@@ -78,9 +78,13 @@ def cmd_analyze(args: argparse.Namespace) -> None:
             f"p={edge['p_value']:.4f}"
         )
     if results.prediction:
-        print(
-            f"\n  Prediction: delta-AUC = {results.prediction['mean_delta_auc']:.3f}"
-        )
+        print("\n  Prediction results:")
+        for key, pred in results.prediction.items():
+            print(
+                f"    {key}: delta-AUC = {pred.get('mean_delta_auc', 0):.3f}, "
+                f"dynamic AUC = {pred.get('mean_dynamic_auc', 0.5):.3f}, "
+                f"baseline AUC = {pred.get('mean_baseline_auc', 0.5):.3f}"
+            )
 
 
 def cmd_demo(args: argparse.Namespace) -> None:

@@ -18,6 +18,10 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 from scipy.fft import fft, ifft, fftfreq
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -167,23 +171,31 @@ def compute_ccf(
             f"Need at least {2 * max_lag_samples + 1}."
         )
 
+    # Normalize: remove means
+    x_demean = x - x.mean()
+    y_demean = y - y.mean()
+
     # Apply Hanning window for edge-effect mitigation
     if apply_window:
         win = _hanning_window(n)
-        x_w = (x - x.mean()) * win
-        y_w = (y - y.mean()) * win
+        x_w = x_demean * win
+        y_w = y_demean * win
     else:
-        x_w = x - x.mean()
-        y_w = y - y.mean()
+        x_w = x_demean
+        y_w = y_demean
 
     # Normalized cross-correlation (vectorized via numpy)
     # scipy.signal.correlate equivalent: mode='same' would center, but we
     # use 'full' and extract the valid range
     nccf = np.correlate(x_w, y_w, mode="full")
 
-    # Normalize to Pearson-like correlation
-    norm_x = np.sqrt(np.sum(x_w ** 2))
-    norm_y = np.sqrt(np.sum(y_w ** 2))
+    # Normalize to Pearson correlation using UNWINDOWED denominator.
+    # The standard Pearson normalization uses the variance of the raw
+    # demeaned signal, not the window-weighted variance.  This ensures
+    # CCF values stay in [-1, 1] — the window only tapers edge
+    # contributions to the numerator (cross-product sum), not the scale.
+    norm_x = np.sqrt(np.sum(x_demean ** 2))
+    norm_y = np.sqrt(np.sum(y_demean ** 2))
     if norm_x > 0 and norm_y > 0:
         nccf = nccf / (norm_x * norm_y)
 
@@ -257,9 +269,12 @@ def cascade_analysis(
                         continue
 
                     # Trim leading and trailing NaN only — never slice internal gaps.
-                    # Internal NaN → fill with 0 (zero contribution to correlation).
                     either_nan = np.isnan(x) | np.isnan(y)
                     if either_nan.sum() == len(x):
+                        logger.debug(
+                            "Skipping %s/%s x %s/%s: entirely NaN",
+                            name_a, col_a, name_b, col_b,
+                        )
                         continue  # entirely NaN
                     # Find first/last valid index to trim edges
                     first_valid = int(np.argmax(~either_nan))
@@ -267,10 +282,26 @@ def cascade_analysis(
                     x_trim = x[first_valid : last_valid + 1].copy()
                     y_trim = y[first_valid : last_valid + 1].copy()
                     if len(x_trim) < 20:
+                        logger.debug(
+                            "Skipping %s/%s x %s/%s: segment too short (%d < 20)",
+                            name_a, col_a, name_b, col_b, len(x_trim),
+                        )
                         continue
-                    # Fill internal NaN with 0 (preserves length, no time-axis collapse)
-                    x_clean = np.where(np.isnan(x_trim), 0.0, x_trim)
-                    y_clean = np.where(np.isnan(y_trim), 0.0, y_trim)
+                    # Fill internal NaN with local mean instead of 0.
+                    # Zero-filling creates false synchrony when both signals
+                    # have NaN at the same positions (0 vs 0 = "perfect sync").
+                    # Local mean is a more conservative imputation.
+                    nan_ratio = np.isnan(x_trim).sum() / len(x_trim)
+                    if nan_ratio > 0.1:
+                        logger.warning(
+                            "High NaN ratio (%.1f%%) in %s/%s x %s/%s, "
+                            "results may be unreliable",
+                            nan_ratio * 100, name_a, col_a, name_b, col_b,
+                        )
+                    x_mean = np.nanmean(x_trim)
+                    y_mean = np.nanmean(y_trim)
+                    x_clean = np.where(np.isnan(x_trim), x_mean if not np.isnan(x_mean) else 0.0, x_trim)
+                    y_clean = np.where(np.isnan(y_trim), y_mean if not np.isnan(y_mean) else 0.0, y_trim)
 
                     # Cap max_lag_sec to the mathematically feasible range for
                     # this particular segment.  CCF needs n >= 2*max_lag + 1,
@@ -279,6 +310,13 @@ def cascade_analysis(
                     feasible_lag_samples = (n_seg - 1) // 2
                     feasible_lag_sec = feasible_lag_samples / hz
                     effective_max_lag = min(max_lag_sec, feasible_lag_sec)
+                    if effective_max_lag < max_lag_sec:
+                        logger.info(
+                            "Capped max_lag from %.1fs to %.1fs for "
+                            "%s/%s x %s/%s (segment length %d)",
+                            max_lag_sec, effective_max_lag,
+                            name_a, col_a, name_b, col_b, n_seg,
+                        )
 
                     # Compute observed CCF
                     lags_sec, ccf_vals = compute_ccf(
@@ -314,8 +352,10 @@ def cascade_analysis(
                         )
                         null_peaks[s] = np.max(np.abs(ccf_s))
 
-                    # p-value: fraction of surrogates >= observed
-                    p_val = float(np.mean(null_peaks >= abs(peak_val)))
+                    # p-value: fraction of surrogates strictly > observed
+                    # Using strict inequality avoids inflating p on bounded
+                    # discrete distributions (e.g., surrogate_n is small).
+                    p_val = float(np.mean(null_peaks > abs(peak_val)))
                     is_sig = p_val < alpha
 
                     result = CCAResult(

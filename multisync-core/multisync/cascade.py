@@ -392,10 +392,26 @@ def cascade_analysis(
                         )
                         null_peaks[s] = np.max(np.abs(ccf_s))
 
-                    # p-value: fraction of surrogates strictly > observed
-                    # Using strict inequality avoids inflating p on bounded
-                    # discrete distributions (e.g., surrogate_n is small).
-                    p_val = float(np.mean(null_peaks > abs(peak_val)))
+                    # p-value: Phipson & Smyth (2010) unbiased permutation
+                    # p-value estimator.  The observed statistic is treated as
+                    # one draw from the null distribution, so the minimum
+                    # possible p is 1 / (surrogate_n + 1) rather than 0.
+                    #
+                    # Formula: p = (1 + #{surrogates >= |observed|}) / (N + 1)
+                    #
+                    # Why not np.mean(null > obs)?
+                    #   - With N=500, a perfectly extreme signal gives p=0.0,
+                    #     which is statistically non-standard and rejected by
+                    #     most journals.  The +1 correction ensures p ∈ (0, 1].
+                    # Why >= instead of >?
+                    #   - Strict > is anti-conservative on discrete null
+                    #     distributions; >= gives correct coverage (Phipson &
+                    #     Smyth, Stat Appl Genet Mol Biol, 2010).
+                    surrogate_n_actual = len(null_peaks)
+                    p_val = float(
+                        (1.0 + np.sum(null_peaks >= abs(peak_val)))
+                        / (surrogate_n_actual + 1.0)
+                    )
                     is_sig = p_val < alpha
 
                     result = CCAResult(

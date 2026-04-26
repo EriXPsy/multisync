@@ -278,15 +278,34 @@ def rolling_origin_cv(
         wcc, window_size, step, horizon_windows, threshold
     )
 
-    # Align: only keep rows where both features and labels are valid
-    both_valid = valid_mask & ~np.any(np.isnan(X), axis=1)
+    # Align: only keep rows where both (a) the label is valid AND
+    # (b) the feature row is not *structurally* empty.
+    #
+    # CRITICAL — do NOT use np.any here.  Several features have semantically
+    # meaningful NaN values:
+    #   - onset_latency / onset_amplitude = NaN  →  no onset crossed threshold
+    #   - recovery_time = NaN               →  no recovery phase observed
+    # These NaN slots represent "low-synchrony / flat" windows, which are
+    # the primary *negative* training examples for the predictor.
+    # Dropping them with np.any would cause Survivorship Bias: the model
+    # trains only on windows that had a visible synchrony episode (positive
+    # class), never seeing the contrast examples it needs to learn what
+    # *precedes* non-synchrony.
+    #
+    # Correct rule: only discard rows where ALL 10 features are NaN
+    # (structurally missing window — no data at all).  Partial-NaN rows
+    # survive and have their missing features replaced with 0 below.
+    all_nan_rows = np.all(np.isnan(X), axis=1)
+    both_valid = valid_mask & ~all_nan_rows
     X = X[both_valid]
     y = y[both_valid].astype(int)
 
-    # Count non-NaN features per row (for diagnostics)
+    # Count non-NaN features per row (for diagnostics), then zero-fill.
+    # After the np.all filter above, every surviving row has at least one
+    # valid feature; nan_to_num(0.0) is a conservative "no information"
+    # imputation for the remaining missing slots.
     if len(X) > 0:
         n_non_nan = (~np.isnan(X)).sum(axis=1)
-        # Replace NaN features with 0 (conservative: no information)
         X = np.nan_to_num(X, nan=0.0)
         avg_features_used = int(np.mean(n_non_nan))
     else:

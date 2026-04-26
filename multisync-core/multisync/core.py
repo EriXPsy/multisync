@@ -100,6 +100,11 @@ class AnalysisResults:
     cross_modal_prediction: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     # Context / Score view
     score_view: List[Dict[str, Any]] = field(default_factory=list)
+    # Diagnostics — structured log of skipped/failed computations.
+    # Each entry: {"stage": str, "pair": str, "reason": str, "detail": dict}
+    # This replaces silent logger-only drops so the frontend can render
+    # a "Data Exclusion Report" panel instead of showing empty results.
+    diagnostics: List[Dict[str, Any]] = field(default_factory=list)
     # Metadata
     parameters: Dict[str, Any] = field(default_factory=dict)
 
@@ -113,6 +118,7 @@ class AnalysisResults:
             "prediction": self.prediction,
             "cross_modal_prediction": self.cross_modal_prediction,
             "score_view": self.score_view,
+            "diagnostics": self.diagnostics,
             "parameters": self.parameters,
         }
 
@@ -126,30 +132,38 @@ class AnalysisResults:
 
         Schema:
         {
-            "schema_version": "0.1.0",
+            "schema_version": "0.2.0",
             "dyad_id": "pair_01",
             "cascade_graph": {
                 "nodes": ["Behavior", "Neural"],
                 "edges": [{"from": "Behavior", "to": "Neural",
                            "lag_sec": 12.5, "ccf_value": 0.67,
-                           "p_value": 0.003}]
+                           "p_value": 0.003, "polarity": "positive"}]
             },
             "dynamic_features": {"behavior__neural": {...}},
             "prediction": {"neural_behavioral": {...}},
             "score_view": [{"start_sec": 0, "end_sec": 300,
-                           "label": "Task", "mean_sync": 0.45}]
+                           "label": "Task", "mean_sync": 0.45}],
+            "diagnostics": [{"stage": "cascade", "pair": "neural__behavioral",
+                             "reason": "segment_too_short", "detail": {...}}]
         }
         """
         d = self.to_dict()
 
         # Replace NaN/Inf with None (JSON null) before serialization.
-        # Using default=str as fallback would turn NaN into the string
-        # "nan", which breaks frontend type checks (typeof === "string").
+        # Also convert numpy scalars and arrays to native Python types so
+        # json.dump never raises TypeError on np.float64 / np.ndarray.
         def _sanitize(obj: Any) -> Any:
+            # Numpy scalars → native Python
+            if isinstance(obj, (np.floating, np.complexfloating)):
+                v = float(obj)
+                return None if (np.isnan(v) or np.isinf(v)) else v
+            if isinstance(obj, np.integer):
+                return int(obj)
+            if isinstance(obj, np.ndarray):
+                return _sanitize(obj.tolist())
             if isinstance(obj, float):
-                if np.isnan(obj) or np.isinf(obj):
-                    return None
-                return obj
+                return None if (np.isnan(obj) or np.isinf(obj)) else obj
             if isinstance(obj, dict):
                 return {k: _sanitize(v) for k, v in obj.items()}
             if isinstance(obj, (list, tuple)):
@@ -323,6 +337,7 @@ class DynamicAnalyzer:
                 "ccf_value": e.ccf_value,
                 "p_value": e.p_value,
                 "is_significant": e.is_significant,
+                "polarity": e.polarity,
             }
             for e in cascade_edges
         ]

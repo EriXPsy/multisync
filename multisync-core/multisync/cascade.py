@@ -46,6 +46,20 @@ class CCAResult:
     surrogate_n: int = 0
     null_peak_ccf: Optional[np.ndarray] = None  # surrogates' peak CCFs
 
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "modality_a": self.modality_a,
+            "modality_b": self.modality_b,
+            "feature_a": self.feature_a,
+            "feature_b": self.feature_b,
+            "peak_lag_sec": float(self.peak_lag_sec),
+            "peak_ccf": float(self.peak_ccf),
+            "direction": self.direction,
+            "is_significant": self.is_significant,
+            "p_value": float(self.p_value),
+            "surrogate_n": self.surrogate_n,
+        }
+
 
 @dataclass
 class CascadeEdge:
@@ -56,6 +70,18 @@ class CascadeEdge:
     ccf_value: float
     p_value: float
     is_significant: bool
+    polarity: str = "positive"  # "positive" (excitatory) or "negative" (inhibitory)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "source": self.source,
+            "target": self.target,
+            "lag_sec": float(self.lag_sec),
+            "ccf_value": float(self.ccf_value),
+            "p_value": float(self.p_value),
+            "is_significant": self.is_significant,
+            "polarity": self.polarity,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +465,7 @@ def cascade_analysis(
                             ccf_value=peak_val,
                             p_value=p_val,
                             is_significant=True,
+                            polarity="positive" if peak_val >= 0 else "negative",
                         ))
 
     return cca_results, edges

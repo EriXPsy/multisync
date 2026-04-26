@@ -25,7 +25,7 @@ Reviewer requirements enforced:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression
@@ -69,6 +69,16 @@ class FoldResult:
     baseline_auc: float
     delta_auc: float  # dynamic - baseline
 
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "fold_id": self.fold_id,
+            "train_size": self.train_size,
+            "test_size": self.test_size,
+            "dynamic_auc": float(self.dynamic_auc),
+            "baseline_auc": float(self.baseline_auc),
+            "delta_auc": float(self.delta_auc),
+        }
+
 
 @dataclass
 class PredictionResult:
@@ -83,6 +93,20 @@ class PredictionResult:
     folds: List[FoldResult] = field(default_factory=list)
     warning: Optional[str] = None  # e.g. "leakage suspected"
     n_features_used: int = 0  # how many of the 10 features were non-NaN
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "source_pair": self.source_pair,
+            "target_pair": self.target_pair,
+            "mode": self.mode,
+            "feature_importance": {k: float(v) for k, v in self.feature_importance.items()},
+            "mean_dynamic_auc": float(self.mean_dynamic_auc),
+            "mean_baseline_auc": float(self.mean_baseline_auc),
+            "mean_delta_auc": float(self.mean_delta_auc),
+            "warning": self.warning,
+            "n_features_used": self.n_features_used,
+            "folds": [f.to_dict() for f in self.folds],
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -300,13 +324,43 @@ def rolling_origin_cv(
     X = X[both_valid]
     y = y[both_valid].astype(int)
 
-    # Count non-NaN features per row (for diagnostics), then zero-fill.
+    # Count non-NaN features per row (for diagnostics), then impute.
     # After the np.all filter above, every surviving row has at least one
-    # valid feature; nan_to_num(0.0) is a conservative "no information"
-    # imputation for the remaining missing slots.
+    # valid feature.
+    #
+    # CRITICAL — imputation strategy depends on feature semantics:
+    #
+    #   * Duration / latency features (onset_latency, recovery_time):
+    #     NaN means "event never occurred within the window".  Filling with
+    #     0.0 would tell the model "instant onset / instant recovery" — the
+    #     most extreme positive value — which is the opposite of reality.
+    #     Instead, fill with window_duration (the maximum possible value),
+    #     meaning "so slow it never happened within the observation window".
+    #
+    #   * Rate / amplitude / slope features (build_up_rate, peak_amplitude,
+    #     breakdown_rate, etc.):
+    #     NaN here means "no event → no rate/amplitude".  Filling with 0.0
+    #     is semantically correct: no build-up = rate of 0.
+    #
+    # Feature indices (matching FEATURE_NAMES order):
+    #   0  onset_latency       — DURATION → fill with window_duration
+    #   1  onset_amplitude     — AMPLITUDE → fill with 0.0
+    #   2  build_up_rate       — RATE → fill with 0.0
+    #   3  build_up_slope      — RATE → fill with 0.0
+    #   4  peak_amplitude      — AMPLITUDE → fill with 0.0
+    #   5  peak_duration       — DURATION → fill with window_duration
+    #   6  breakdown_rate      — RATE → fill with 0.0
+    #   7  recovery_time       — DURATION → fill with window_duration
+    #   8  mean_synchrony      — LEVEL → fill with 0.0
+    #   9  synchrony_entropy   — LEVEL → fill with 0.0
+    DURATION_FEATURE_IDX = {0, 5, 7}  # onset_latency, peak_duration, recovery_time
+    window_duration = window_size / hz
+
     if len(X) > 0:
         n_non_nan = (~np.isnan(X)).sum(axis=1)
-        X = np.nan_to_num(X, nan=0.0)
+        for col_idx in DURATION_FEATURE_IDX:
+            X[np.isnan(X[:, col_idx]), col_idx] = window_duration
+        X = np.nan_to_num(X, nan=0.0)  # remaining NaN → 0.0 (rates/amplitudes)
         avg_features_used = int(np.mean(n_non_nan))
     else:
         avg_features_used = 0

@@ -23,6 +23,9 @@ if TYPE_CHECKING:
 import numpy as np
 from scipy import signal as sp_signal
 from scipy.stats import entropy as sp_entropy
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +154,7 @@ def extract_dynamic_features(
     wcc: np.ndarray,
     hz: float = 1.0,
     onset_threshold: float = 0.2,
+    max_nan_ratio: float = 0.2,
 ) -> DynamicFeatures:
     """
     Extract 10 dynamic features from a WCC time series.
@@ -163,33 +167,43 @@ def extract_dynamic_features(
         Sampling rate of WCC (Hz).
     onset_threshold : float
         Minimum WCC value to count as "significant synchrony onset".
+    max_nan_ratio : float
+        Maximum fraction of NaN values permitted.  If the NaN ratio exceeds
+        this threshold, all features are returned as NaN.  Default 0.2 (20%).
+        This prevents spurious dynamic features being extracted from segments
+        where structural missingness (e.g., face tracking dropout) dominates.
 
     Returns
     -------
     DynamicFeatures with all 10 features.
     """
-    # Handle NaN
-    valid = ~np.isnan(wcc)
-    if valid.sum() < 5:
-        empty = DynamicFeatures(
-            onset_latency=np.nan, onset_amplitude=np.nan,
-            build_up_rate=np.nan, build_up_slope=np.nan,
-            peak_amplitude=np.nan, peak_duration=np.nan,
-            breakdown_rate=np.nan, recovery_time=np.nan,
-            mean_synchrony=np.nan, synchrony_entropy=np.nan,
-        )
-        return empty
+    _nan_features = DynamicFeatures(
+        onset_latency=np.nan, onset_amplitude=np.nan,
+        build_up_rate=np.nan, build_up_slope=np.nan,
+        peak_amplitude=np.nan, peak_duration=np.nan,
+        breakdown_rate=np.nan, recovery_time=np.nan,
+        mean_synchrony=np.nan, synchrony_entropy=np.nan,
+    )
 
-    wcc_clean = wcc.copy()
-    wcc_clean[~valid] = 0.0
+    # Hard NaN-ratio guard: structural missingness → reject the whole window
+    valid = ~np.isnan(wcc)
+    nan_ratio = 1.0 - valid.mean()
+    if nan_ratio > max_nan_ratio or valid.sum() < 5:
+        return _nan_features
+
+    # Work on a copy where NaN positions stay NaN (never zero-fill here).
+    # Zero-filling corrupts onset detection (wcc==0 is "below threshold" but
+    # not missing) and distorts linear slope fits for build-up / breakdown.
+    wcc_valid_only = wcc.copy()  # NaN positions remain NaN
     dt = 1.0 / hz
 
     # --- Onset ---
-    onset_indices = np.where(wcc_clean >= onset_threshold)[0]
+    # Use only valid (non-NaN) positions for threshold detection.
+    onset_indices = np.where(valid & (wcc_valid_only >= onset_threshold))[0]
     if len(onset_indices) > 0:
         onset_idx = int(onset_indices[0])
         onset_latency = onset_idx * dt
-        onset_amplitude = float(wcc_clean[onset_idx])
+        onset_amplitude = float(wcc_valid_only[onset_idx])
     else:
         onset_idx = 0
         onset_latency = np.nan
@@ -199,22 +213,26 @@ def extract_dynamic_features(
     # Use -inf to fill NaN positions so they can NEVER be selected as peak.
     # This prevents zero-padded NaN slots from creating false peaks when
     # all valid WCC values are negative.
-    wcc_valid_only = wcc.copy()
-    wcc_valid_only[~valid] = -np.inf
-    peak_idx = int(np.argmax(wcc_valid_only))
-    peak_amplitude = float(wcc_valid_only[peak_idx])
+    wcc_for_peak = wcc_valid_only.copy()
+    wcc_for_peak[~valid] = -np.inf
+    peak_idx = int(np.argmax(wcc_for_peak))
+    peak_amplitude = float(wcc_for_peak[peak_idx])
     peak_time = peak_idx * dt
 
     # --- Build-up ---
     if onset_idx < peak_idx and not np.isnan(onset_latency):
         build_up_duration = (peak_idx - onset_idx) * dt
         build_up_rate = (peak_amplitude - onset_amplitude) / build_up_duration if build_up_duration > 0 else 0.0
-        # Linear slope during build-up window
+        # Linear slope during build-up window — skip NaN positions
         if peak_idx - onset_idx > 1:
-            build_up_segment = wcc_clean[onset_idx:peak_idx + 1]
-            t_segment = np.arange(len(build_up_segment)) * dt
-            slope, _ = np.polyfit(t_segment, build_up_segment, 1)
-            build_up_slope = float(slope)
+            build_up_segment = wcc_valid_only[onset_idx:peak_idx + 1]
+            bu_valid = ~np.isnan(build_up_segment)
+            if bu_valid.sum() > 1:
+                t_segment = np.arange(len(build_up_segment))[bu_valid] * dt
+                slope, _ = np.polyfit(t_segment, build_up_segment[bu_valid], 1)
+                build_up_slope = float(slope)
+            else:
+                build_up_slope = 0.0
         else:
             build_up_slope = 0.0
     else:
@@ -224,43 +242,45 @@ def extract_dynamic_features(
     # --- Peak duration (time above 75% of peak) ---
     if peak_amplitude > 0:
         threshold_75 = 0.75 * peak_amplitude
-        above_75 = wcc_clean >= threshold_75
+        # Only count valid (non-NaN) positions above threshold
+        above_75 = valid & (wcc_valid_only >= threshold_75)
         peak_duration = float(np.sum(above_75) * dt)
     else:
         peak_duration = 0.0
 
     # --- Breakdown ---
-    if peak_idx < len(wcc_clean) - 1:
-        post_peak = wcc_clean[peak_idx:]
-        # Rate of decrease: linear slope after peak
-        if len(post_peak) > 1:
-            t_post = np.arange(len(post_peak)) * dt
-            slope, _ = np.polyfit(t_post, post_peak, 1)
+    if peak_idx < len(wcc_valid_only) - 1:
+        post_peak = wcc_valid_only[peak_idx:]
+        post_valid = ~np.isnan(post_peak)
+        # Rate of decrease: linear slope after peak (valid points only)
+        if post_valid.sum() > 1:
+            t_post = np.arange(len(post_peak))[post_valid] * dt
+            slope, _ = np.polyfit(t_post, post_peak[post_valid], 1)
             breakdown_rate = -float(slope)  # positive = decreasing
         else:
             breakdown_rate = 0.0
 
         # Recovery time: time from peak to WCC dropping below onset level
-        if onset_amplitude is not np.nan and not np.isnan(onset_amplitude):
-            recovery_mask = post_peak < onset_amplitude
+        if not np.isnan(onset_amplitude):
+            recovery_mask = post_valid & (post_peak < onset_amplitude)
             if recovery_mask.any():
                 recovery_samples = np.argmax(recovery_mask)
                 recovery_time = recovery_samples * dt
             else:
-                recovery_time = float((len(wcc_clean) - 1 - peak_idx) * dt)
+                recovery_time = float((len(wcc_valid_only) - 1 - peak_idx) * dt)
         else:
             recovery_time = np.nan
     else:
         breakdown_rate = 0.0
         recovery_time = np.nan
 
-    # --- Global features ---
-    mean_synchrony = float(np.mean(wcc_clean[valid]))
+    # --- Global features (only over valid samples) ---
+    wcc_valid_vals = wcc_valid_only[valid]
+    mean_synchrony = float(np.mean(wcc_valid_vals))
 
     # Shannon entropy of binned WCC distribution
-    wcc_valid = wcc_clean[valid]
-    if len(wcc_valid) > 1 and np.std(wcc_valid) > 0:
-        hist, _ = np.histogram(wcc_valid, bins=10, density=True)
+    if len(wcc_valid_vals) > 1 and np.std(wcc_valid_vals) > 0:
+        hist, _ = np.histogram(wcc_valid_vals, bins=10, density=True)
         hist = hist[hist > 0]  # remove zero bins
         hist = hist / hist.sum()  # normalize
         synchrony_entropy = float(sp_entropy(hist))
@@ -331,6 +351,7 @@ def extract_features_segmented(
     window_size: int = 10,
     hz: float = 1.0,
     onset_threshold: float = 0.2,
+    max_nan_ratio: float = 0.2,
 ) -> Dict[str, Dict[str, DynamicFeatures]]:
     """
     Compute WCC + dynamic features per CONTEXT segment.
@@ -351,6 +372,11 @@ def extract_features_segmented(
         Sampling rate.
     onset_threshold : float
         WCC threshold for onset detection.
+    max_nan_ratio : float
+        Maximum NaN fraction in a segment pair before skipping it entirely.
+        Default 0.2 (20%).  Tighter than the old 0.5 threshold to prevent
+        structural missingness (e.g., face tracking dropout) from producing
+        spurious dynamic feature estimates.
 
     Returns
     -------
@@ -378,8 +404,18 @@ def extract_features_segmented(
 
     for label, start_sec, end_sec in segments:
         mask = (t_vec >= start_sec) & (t_vec < end_sec)
-        if mask.sum() < window_size + 5:
-            # Segment too short for meaningful feature extraction
+        # Minimum segment length: need at least 3 × window_size samples so
+        # that the resulting WCC series has >= 2*window_size+1 points — enough
+        # for meaningful feature extraction and rolling-origin CV.
+        # window_size + 5 is far too lenient (a 45-sample segment at 1 Hz
+        # with window_size=10 would pass, but produce only 35 WCC values).
+        min_seg_len = 3 * window_size
+        if mask.sum() < min_seg_len:
+            logger.warning(
+                "Context '%s': segment too short (%d samples < %d = 3×window_size). "
+                "Skipping — results would lack statistical power.",
+                label, int(mask.sum()), min_seg_len,
+            )
             results[label] = {}
             continue
 
@@ -397,11 +433,14 @@ def extract_features_segmented(
                         x_seg = x[mask]
                         y_seg = y[mask]
 
-                        # Skip if segment has too many NaNs
+                        # Skip if segment has too many NaNs.
+                        # Structural missingness (e.g. face tracking dropout)
+                        # causes NaN-filling artefacts in dynamic features.
+                        # Require at least (1 - max_nan_ratio) valid samples.
                         valid_ratio = (
                             ~np.isnan(x_seg) & ~np.isnan(y_seg)
                         ).sum() / len(x_seg)
-                        if valid_ratio < 0.5:
+                        if valid_ratio < (1.0 - max_nan_ratio):
                             continue
 
                         wcc = sliding_window_wcc(
@@ -410,7 +449,7 @@ def extract_features_segmented(
                         if len(wcc) < 5:
                             continue
                         feat = extract_dynamic_features(
-                            wcc, hz, onset_threshold
+                            wcc, hz, onset_threshold, max_nan_ratio
                         )
                         key = f"{name_a}_{col_a}__{name_b}_{col_b}"
                         seg_results[key] = feat

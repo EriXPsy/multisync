@@ -16,7 +16,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-from scipy.fft import fft, ifft, fftfreq
+from scipy.fft import fft, ifft
+from scipy.signal import correlate as sp_correlate
 
 import logging
 
@@ -64,15 +65,23 @@ class CascadeEdge:
 def _prft_surrogate(
     x: np.ndarray,
     rng: np.random.Generator,
+    taper_fraction: float = 0.1,
 ) -> np.ndarray:
     """
     Generate a Phase-Randomized Fourier Transform surrogate.
 
     Steps:
-    1. FFT of original signal.
-    2. Randomize phases uniformly in [-pi, pi], except keep DC and Nyquist
+    1. Apply a short cosine taper to the signal edges to suppress spectral
+       leakage from discontinuous endpoints (edge jump artifact).
+       The taper covers *taper_fraction* of the signal on each side
+       (default 10%), leaving the central 80% untouched.  This is a split
+       cosine bell — NOT a full Hanning window — so the bulk of the power
+       spectrum is preserved.  Applying a full window here would distort
+       the power spectrum that PRTF is supposed to maintain.
+    2. FFT of the tapered signal.
+    3. Randomize phases uniformly in [-pi, pi], except keep DC and Nyquist
        phases fixed (preserve mean and amplitude distribution).
-    3. Inverse FFT → surrogate with same power spectrum, destroyed temporal
+    4. Inverse FFT → surrogate with same power spectrum, destroyed temporal
        structure.
 
     Parameters
@@ -81,6 +90,8 @@ def _prft_surrogate(
         Original time series.
     rng : numpy Generator
         Random number generator (for reproducibility).
+    taper_fraction : float
+        Fraction of signal length to taper at each end (default 0.1 = 10%).
 
     Returns
     -------
@@ -90,11 +101,22 @@ def _prft_surrogate(
     if n < 4:
         return x.copy()
 
-    # FFT
-    X = fft(x)
-    freqs = fftfreq(n)
+    # --- Step 1: edge taper to eliminate spectral leakage ---
+    # Build a split cosine bell: ramp up on the first taper_len samples,
+    # flat 1.0 in the middle, ramp down on the last taper_len samples.
+    # This is mathematically a Tukey window with alpha = 2 * taper_fraction.
+    taper_len = max(1, int(np.floor(n * taper_fraction)))
+    taper = np.ones(n, dtype=float)
+    # Left ramp: 0 → 1 over taper_len samples using a half cosine
+    ramp = 0.5 * (1.0 - np.cos(np.pi * np.arange(taper_len) / taper_len))
+    taper[:taper_len] = ramp
+    taper[-taper_len:] = ramp[::-1]
+    x_tapered = x * taper
 
-    # Randomize phases (preserve DC at index 0 and Nyquist at index n//2)
+    # --- Step 2: FFT ---
+    X = fft(x_tapered)
+
+    # --- Step 3: Randomize phases (preserve DC at index 0 and Nyquist) ---
     phases = np.angle(X)
     random_phases = rng.uniform(-np.pi, np.pi, size=n)
 
@@ -104,7 +126,6 @@ def _prft_surrogate(
         random_phases[n // 2] = phases[n // 2]
 
     # Enforce Hermitian symmetry: X[k] = conj(X[n-k])
-    # For real-valued signal, we only randomize the first half (including Nyquist)
     X_new = np.zeros_like(X)
     half = n // 2 + 1  # include Nyquist for even n
     for k in range(half):
@@ -115,6 +136,7 @@ def _prft_surrogate(
             # Mirror frequency (skip when k == n-k, i.e., Nyquist for even n)
             X_new[n - k] = np.conj(X_new[k])
 
+    # --- Step 4: IFFT ---
     surrogate = np.real(ifft(X_new))
     return surrogate
 
@@ -184,10 +206,12 @@ def compute_ccf(
         x_w = x_demean
         y_w = y_demean
 
-    # Normalized cross-correlation (vectorized via numpy)
-    # scipy.signal.correlate equivalent: mode='same' would center, but we
-    # use 'full' and extract the valid range
-    nccf = np.correlate(x_w, y_w, mode="full")
+    # Normalized cross-correlation via FFT convolution — O(n log n).
+    # scipy.signal.correlate with method="fft" uses the FFT convolution theorem,
+    # which reduces complexity from O(n²) (direct convolution) to O(n log n).
+    # This is critical when surrogate_n is large (e.g., 500 surrogates × n²
+    # operations would stall on signals with n > 3000 samples).
+    nccf = sp_correlate(x_w, y_w, mode="full", method="fft")
 
     # Normalize to Pearson correlation using UNWINDOWED denominator.
     # The standard Pearson normalization uses the variance of the raw
@@ -317,6 +341,22 @@ def cascade_analysis(
                             max_lag_sec, effective_max_lag,
                             name_a, col_a, name_b, col_b, n_seg,
                         )
+
+                    # Degrees-of-freedom guard: CCF + Surrogate testing on very
+                    # short segments produces noise peaks, not real synchrony.
+                    # Require n >= 3 * effective_max_lag_samples + 1 so that
+                    # there are at least 3 full lag-windows of data.  If not,
+                    # skip this pair entirely rather than emit noisy results.
+                    min_required = 3 * int(np.floor(effective_max_lag * hz)) + 1
+                    if n_seg < min_required:
+                        logger.warning(
+                            "Skipping %s/%s x %s/%s: segment (%d samples) is "
+                            "too short for reliable CCF+Surrogate analysis "
+                            "(need >= %d = 3×max_lag_samples+1). "
+                            "Results would be statistical noise.",
+                            name_a, col_a, name_b, col_b, n_seg, min_required,
+                        )
+                        continue
 
                     # Compute observed CCF
                     lags_sec, ccf_vals = compute_ccf(

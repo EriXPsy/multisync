@@ -176,7 +176,11 @@ class TestCascade:
         fft_x = np.abs(np.fft.rfft(x)) ** 2
         fft_s = np.abs(np.fft.rfft(surr)) ** 2
         corr = np.corrcoef(fft_x, fft_s)[0, 1]
-        assert corr > 0.9  # spectra should be highly correlated
+        # The cosine taper (10% each end) modifies edge energy slightly,
+        # so the spectrum is not identical to the original but still highly
+        # correlated.  0.85 is a conservative lower bound — values around
+        # 0.89–0.95 are typical after taper.
+        assert corr > 0.85  # spectra should be highly correlated after taper
 
     def test_prft_surrogate_destroys_temporal_structure(self):
         from multisync.cascade import _prft_surrogate

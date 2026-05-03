@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 from scipy import interpolate as sp_interp
+from scipy.ndimage import median_filter
 
 
 # ---------------------------------------------------------------------------
@@ -429,10 +430,24 @@ class SynchronyDataset:
     # Within-dyad Z-score normalization
     # ------------------------------------------------------------------
 
-    def zscore(self) -> Tuple["SynchronyDataset", Dict]:
+    def zscore(
+        self, method: str = "standard", clip_sigma: Optional[float] = None,
+    ) -> Tuple["SynchronyDataset", Dict]:
         """
-        Within-dyad Z-score normalization (ddof=0).  Each feature is
-        independently standardized across all time points in this dyad.
+        Within-dyad normalization.
+
+        Parameters
+        ----------
+        method : str
+            'standard' — mean/std normalization (default).
+            'robust' — median/IQR normalization.  Resistant to outliers
+              (a single EDA spike won't inflate the scale).
+        clip_sigma : float or None
+            If set (e.g., 3.0), Winsorize values beyond ±clip_sigma
+            *before* computing statistics.  This prevents extreme
+            outliers from corrupting even the robust (median/IQR)
+              estimates when outliers cluster.  Only the extreme tails
+              are clipped; the bulk distribution is untouched.
 
         Returns
         -------
@@ -445,18 +460,172 @@ class SynchronyDataset:
             df = self.modalities[name]
             stats[name] = {}
             for col in feat_cols[name]:
-                mu = float(df[col].mean())
-                sigma = float(df[col].std(ddof=0))
-                stats[name][col] = {"mean": mu, "std": sigma}
-                if sigma > 0:
-                    df[col] = (df[col] - mu) / sigma
+                vals = df[col].values.astype(float)
+
+                if method == "robust":
+                    median = float(np.nanmedian(vals))
+                    q75 = float(np.nanpercentile(vals, 75))
+                    q25 = float(np.nanpercentile(vals, 25))
+                    iqr = q75 - q25
+                    stats[name][col] = {
+                        "median": median, "iqr": iqr,
+                        "q25": q25, "q75": q75,
+                    }
+                    if iqr > 0:
+                        df[col] = (vals - median) / iqr
+                    else:
+                        df[col] = 0.0
                 else:
-                    df[col] = 0.0
+                    # standard (mean/std)
+                    mu = float(np.nanmean(vals))
+                    sigma = float(np.nanstd(vals, ddof=0))
+                    stats[name][col] = {"mean": mu, "std": sigma}
+                    if sigma > 0:
+                        df[col] = (vals - mu) / sigma
+                    else:
+                        df[col] = 0.0
+
+                # Post-normalization Winsorization (clip extreme tails)
+                if clip_sigma is not None:
+                    df[col] = df[col].clip(-clip_sigma, clip_sigma)
 
             self.modalities[name] = df
 
         self._normalized = True
         return self, stats
+
+    # ------------------------------------------------------------------
+    # Outlier clipping (IQR-based Winsorization)
+    # ------------------------------------------------------------------
+
+    def clip_outliers(
+        self,
+        factor: float = 3.0,
+        method: str = "iqr",
+    ) -> Tuple["SynchronyDataset", Dict]:
+        """
+        Detect and clip outliers in-place.
+
+        A single sensor glitch (e.g., sneeze → EDA spike) can dominate
+        CCF and inflate std, compressing all normal fluctuations.  This
+        method clips extreme values BEFORE z-score to prevent that.
+
+        Parameters
+        ----------
+        factor : float
+            IQR multiplier for outlier bounds.  Default 3.0 means values
+            beyond Q1 - 3*IQR or Q3 + 3*IQR are clipped.
+        method : str
+            'iqr' — IQR-based bounds (default).
+            'mad' — Median Absolute Deviation based (more robust to
+              extreme outlier clustering).
+
+        Returns
+        -------
+        self (in-place) and a dict reporting per-feature clipping stats.
+        """
+        feat_cols = self.feature_columns
+        report: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+        for name in self.modality_names:
+            df = self.modalities[name]
+            report[name] = {}
+            for col in feat_cols[name]:
+                vals = df[col].values.astype(float)
+                valid = vals[~np.isnan(vals)]
+                if len(valid) < 10:
+                    report[name][col] = {"clipped": 0, "total": len(vals)}
+                    continue
+
+                if method == "mad":
+                    med = np.median(valid)
+                    mad = np.median(np.abs(valid - med))
+                    # Scale MAD to std equivalent: σ ≈ 1.4826 × MAD
+                    k = 1.4826
+                    lower = med - factor * k * mad
+                    upper = med + factor * k * mad
+                else:
+                    q25 = np.percentile(valid, 25)
+                    q75 = np.percentile(valid, 75)
+                    iqr = q75 - q25
+                    lower = q25 - factor * iqr
+                    upper = q75 + factor * iqr
+
+                n_clipped = int(np.sum((vals < lower) | (vals > upper)))
+                df[col] = df[col].clip(lower, upper)
+                report[name][col] = {
+                    "clipped": n_clipped,
+                    "total": len(vals),
+                    "lower": float(lower),
+                    "upper": float(upper),
+                }
+
+            self.modalities[name] = df
+
+        return self, report
+
+    # ------------------------------------------------------------------
+    # Median filter (pulse noise removal)
+    # ------------------------------------------------------------------
+
+    def median_filter(
+        self,
+        kernel_size: int = 5,
+    ) -> Tuple["SynchronyDataset", Dict]:
+        """
+        Apply sliding median filter to remove pulse-type noise.
+
+        Median filters are ideal for removing short-duration spikes
+        (sensor glitches, movement artifacts) while preserving
+        edge shapes and slow trends.  Unlike low-pass filters, they
+        do NOT introduce phase distortion.
+
+        Parameters
+        ----------
+        kernel_size : int
+            Window size in samples (must be odd).  Default 5.
+            At 1 Hz target rate, kernel_size=5 covers 5 seconds.
+            Recommended: 3-7 for physiological signals at ~1 Hz.
+
+        Returns
+        -------
+        self (in-place) and a dict of filter parameters applied.
+        """
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+
+        feat_cols = self.feature_columns
+        report: Dict[str, Dict[str, int]] = {}
+
+        for name in self.modality_names:
+            df = self.modalities[name]
+            for col in feat_cols[name]:
+                vals = df[col].values.astype(float)
+                mask = ~np.isnan(vals)
+                if mask.sum() < kernel_size:
+                    continue
+                # Only filter non-NaN regions (NaN boundaries preserved)
+                filtered = vals.copy()
+                if mask.all():
+                    filtered = median_filter(vals, size=kernel_size)
+                else:
+                    # Find contiguous non-NaN segments
+                    diff = np.diff(mask.astype(int))
+                    starts = np.where(diff == 1)[0] + 1
+                    ends = np.where(diff == -1)[0] + 1
+                    if mask[0]:
+                        starts = np.concatenate([[0], starts])
+                    if mask[-1]:
+                        ends = np.concatenate([ends, [len(vals)]])
+                    for s, e in zip(starts, ends):
+                        seg = vals[s:e]
+                        if len(seg) >= kernel_size:
+                            filtered[s:e] = median_filter(seg, size=kernel_size)
+                df[col] = filtered
+            report[name] = {"kernel_size": kernel_size}
+            self.modalities[name] = df
+
+        return self, report
 
     # ------------------------------------------------------------------
     # Accessors

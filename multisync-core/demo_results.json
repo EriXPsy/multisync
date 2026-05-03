@@ -4,62 +4,79 @@
   "dynamic_features": {
     "behavior_value__neural_value": {
       "onset_latency": 5.0,
-      "onset_amplitude": 0.2941631659360008,
-      "build_up_rate": 0.003680033556582212,
-      "build_up_slope": -4.595909419331265e-05,
-      "peak_amplitude": 0.7872876625180172,
-      "peak_duration": 26.0,
-      "breakdown_rate": 0.0009895957697293027,
-      "recovery_time": 9.0,
-      "mean_synchrony": -0.04645406782327369,
-      "synchrony_entropy": 2.2749405123753044
+      "onset_amplitude": 0.2941631659360004,
+      "build_up_rate": 0.15945832106618707,
+      "build_up_slope": 0.0,
+      "peak_amplitude": 0.7872876625180154,
+      "peak_duration": 8.373948926714304,
+      "breakdown_rate": 0.11745659493782491,
+      "recovery_time": 18.0,
+      "mean_synchrony": -0.04693796436310251,
+      "synchrony_entropy": 2.2755280024721896
     }
   },
   "dynamic_features_segmented": {
     "PreTask": {
       "behavior_value__neural_value": {
         "onset_latency": 5.0,
-        "onset_amplitude": 0.2941631659360008,
-        "build_up_rate": 0.003680033556582212,
-        "build_up_slope": -4.595909419331265e-05,
-        "peak_amplitude": 0.7872876625180172,
-        "peak_duration": 12.0,
-        "breakdown_rate": 0.038335727500609436,
-        "recovery_time": 1.0,
-        "mean_synchrony": -0.02672427911725108,
-        "synchrony_entropy": 2.269671586846727
+        "onset_amplitude": 0.29416316593599895,
+        "build_up_rate": 0.17642671518524017,
+        "build_up_slope": 0.0,
+        "peak_amplitude": 0.7697083171638015,
+        "peak_duration": 7.528074748401252,
+        "breakdown_rate": 0.10638249860323146,
+        "recovery_time": 26.0,
+        "mean_synchrony": -0.02730524170675665,
+        "synchrony_entropy": 2.2712129129572687
       }
     },
     "Task": {
       "behavior_value__neural_value": {
         "onset_latency": 6.0,
-        "onset_amplitude": 0.2998431589204841,
-        "build_up_rate": 0.004931208355810628,
-        "build_up_slope": -0.0031625424242775857,
-        "peak_amplitude": 0.7831015777899256,
-        "peak_duration": 11.0,
-        "breakdown_rate": 0.019694553838003812,
-        "recovery_time": 8.0,
-        "mean_synchrony": -0.09933341854265941,
+        "onset_amplitude": 0.2998431589204838,
+        "build_up_rate": 0.1299423045528073,
+        "build_up_slope": 0.05973637860274823,
+        "peak_amplitude": 0.7831015777899495,
+        "peak_duration": 8.427002808331878,
+        "breakdown_rate": 0.11738850186868278,
+        "recovery_time": 18.0,
+        "mean_synchrony": -0.09933341854265824,
         "synchrony_entropy": 2.25106606488838
       }
     }
   },
   "cascade_graph": {
     "nodes": [
-      "neural",
-      "behavior"
+      "behavior",
+      "neural"
     ],
     "edges": [
       {
         "from": "behavior",
         "to": "neural",
         "lag_sec": 12.0,
-        "ccf_value": 0.48398708081608777,
-        "p_value": 0.0,
-        "is_significant": true
+        "ccf_value": 0.4850960773017936,
+        "p_value": 0.047619047619047616,
+        "is_significant": true,
+        "polarity": "positive"
       }
     ]
+  },
+  "cascade_metrics": {
+    "behavior": {
+      "in_degree": 0,
+      "out_degree": 1,
+      "driver_score": 1,
+      "is_hub": false,
+      "is_follower": false
+    },
+    "neural": {
+      "in_degree": 1,
+      "out_degree": 0,
+      "driver_score": -1,
+      "is_hub": false,
+      "is_follower": false
+    }
   },
   "prediction": {},
   "cross_modal_prediction": {},
@@ -69,16 +86,17 @@
       "end_sec": 150,
       "label": "PreTask",
       "score": 0.0,
-      "mean_sync": 0.0032525218529489072
+      "mean_sync": 0.0033188998499470187
     },
     {
       "start_sec": 150,
       "end_sec": 300,
       "label": "Task",
       "score": 0.0,
-      "mean_sync": -0.09933341854265941
+      "mean_sync": -0.09933341854266477
     }
   ],
+  "diagnostics": [],
   "parameters": {
     "window_size": 10,
     "surrogate_n": 20,

@@ -23,6 +23,7 @@ from .dataset import SynchronyDataset, ContextLabel
 from .cascade import (
     compute_ccf,
     cascade_analysis,
+    rolling_cascade,
     CCAResult,
     CascadeEdge,
 )
@@ -59,6 +60,7 @@ __all__ = [
     # Cascade
     "compute_ccf",
     "cascade_analysis",
+    "rolling_cascade",
     "CCAResult",
     "CascadeEdge",
     # Features

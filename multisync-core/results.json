@@ -4,14 +4,14 @@
   "dynamic_features": {
     "neural_val__behavior_val": {
       "onset_latency": 1.0,
-      "onset_amplitude": 0.4074113316849147,
-      "build_up_rate": 0.007541678594737894,
-      "build_up_slope": 0.017983140616179914,
-      "peak_amplitude": 0.5582449035796726,
-      "peak_duration": 4.0,
-      "breakdown_rate": 0.0017218477495145514,
-      "recovery_time": 1.0,
-      "mean_synchrony": -0.1227987477937452,
+      "onset_amplitude": 0.4074113316849146,
+      "build_up_rate": 0.13377790830311834,
+      "build_up_slope": 0.0,
+      "peak_amplitude": 0.5582449035796724,
+      "peak_duration": 8.633299361622353,
+      "breakdown_rate": 0.05766203553349709,
+      "recovery_time": 31.0,
+      "mean_synchrony": -0.12279874779374518,
       "synchrony_entropy": 2.1599463957679954
     }
   },
@@ -20,9 +20,11 @@
     "nodes": [],
     "edges": []
   },
+  "cascade_metrics": {},
   "prediction": {},
   "cross_modal_prediction": {},
   "score_view": [],
+  "diagnostics": [],
   "parameters": {
     "window_size": 10,
     "surrogate_n": 10,

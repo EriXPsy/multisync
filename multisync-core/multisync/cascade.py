@@ -626,11 +626,6 @@ def cascade_analysis(
 
         return cca_results, edges, metrics
 
-    # --- Compute lightweight graph metrics (no networkx) ---
-        metrics = compute_cascade_metrics(edges, alpha)
-
-        return cca_results, edges, metrics
-
 
 # ---------------------------------------------------------------------------
 # Multiple Comparisons Correction — Benjamini-Hochberg FDR
@@ -756,6 +751,177 @@ def compute_cascade_metrics(
 
 
 
+
+
+    return metrics
+
+
+# ---------------------------------------------------------------------------
+# Time-Varying Cascade — Rolling Window CCF for Dynamic Leadership Analysis
+# ---------------------------------------------------------------------------
+
+def rolling_cascade(
+    dataset: "SynchronyDataset",
+    window_sec: float = 60.0,
+    step_sec: float = 30.0,
+    max_lag_sec: float = 10.0,
+    apply_window: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    Compute time-varying CCF in overlapping windows.
+
+    The global CCF from ``cascade_analysis`` compresses the entire session
+    into a single lead-lag estimate.  In real social interactions,
+    leadership is **dynamic** — person A may drive synchrony in the first
+    5 minutes while B takes over later.  ``rolling_cascade`` reveals these
+    turn-taking dynamics by computing CCF per window and tracking how
+    peak lag and direction change over time.
+
+    Parameters
+    ----------
+    dataset : SynchronyDataset
+        Must be aligned (normalized is recommended but not required).
+    window_sec : float
+        Duration of each analysis window in seconds.  Default 60.
+        Should be long enough for reliable CCF: ``window_sec > 3 * max_lag_sec``.
+    step_sec : float
+        Step between consecutive windows.  Default 30 (50% overlap).
+        Smaller steps = finer temporal resolution, more computation.
+    max_lag_sec : float
+        Maximum CCF lag per window.  Default 10.
+        **Must be < window_sec / 3** for statistical reliability.
+    apply_window : bool
+        Apply Hanning window within each CCF (default True).
+
+    Returns
+    -------
+    windows : list of dict
+        Each dict represents one time window:
+        {
+            "window_start": float,
+            "window_end": float,
+            "window_center": float,
+            "pairs": [{ ... }],
+            "driver_score": { modality: int },
+        }
+
+    Notes
+    -----
+    No surrogate testing is performed per-window (too expensive for
+    rolling analysis).  For significance, run ``cascade_analysis`` on the
+    full session first, then use ``rolling_cascade`` to decompose the
+    temporal dynamics of significant pairs.
+    """
+    if not dataset._aligned:
+        raise ValueError("Dataset must be aligned before rolling cascade.")
+
+    if max_lag_sec >= window_sec / 3:
+        raise ValueError(
+            f"max_lag_sec ({max_lag_sec}) must be < window_sec / 3 "
+            f"({window_sec / 3:.1f}).  CCF needs >=3x max_lag of data "
+            f"per window for reliable estimation."
+        )
+
+    hz = dataset.target_hz
+    if hz <= 0:
+        raise ValueError(f"Invalid sampling rate: {hz} Hz")
+
+    win_samples = int(np.floor(window_sec * hz))
+    step_samples = int(np.floor(step_sec * hz))
+    min_samples = 2 * int(np.floor(max_lag_sec * hz)) + 1
+
+    if win_samples < min_samples:
+        raise ValueError(
+            f"Window ({win_samples} samples) too short for max_lag={max_lag_sec}s. "
+            f"Need at least {min_samples} samples."
+        )
+
+    feat_cols = dataset.feature_columns
+    modality_names = dataset.modality_names
+
+    min_len = min(
+        len(dataset.modalities[name])
+        for name in modality_names
+        if dataset.modalities[name] is not None
+    )
+
+    results: List[Dict[str, Any]] = []
+
+    for start in range(0, min_len - win_samples + 1, step_samples):
+        end = start + win_samples
+        t_start = float(start / hz)
+        t_end = float(end / hz)
+        t_center = float((start + end) / 2 / hz)
+
+        pairs: List[Dict[str, Any]] = []
+        driver_delta: Dict[str, int] = {}
+
+        for i, name_a in enumerate(modality_names):
+            for name_b in modality_names[i + 1:]:
+                for col_a in feat_cols[name_a]:
+                    for col_b in feat_cols[name_b]:
+                        x = dataset.get_aligned_array(name_a, col_a)
+                        y = dataset.get_aligned_array(name_b, col_b)
+                        if x is None or y is None:
+                            continue
+
+                        x_win = x[start:end].copy()
+                        y_win = y[start:end].copy()
+
+                        either_nan = np.isnan(x_win) | np.isnan(y_win)
+                        if either_nan.sum() > 0.2 * len(x_win):
+                            continue
+
+                        x_mean = np.nanmean(x_win)
+                        y_mean = np.nanmean(y_win)
+                        x_clean = np.where(
+                            np.isnan(x_win),
+                            x_mean if not np.isnan(x_mean) else 0.0, x_win,
+                        )
+                        y_clean = np.where(
+                            np.isnan(y_win),
+                            y_mean if not np.isnan(y_mean) else 0.0, y_win,
+                        )
+
+                        try:
+                            lags, ccf = compute_ccf(
+                                x_clean, y_clean, max_lag_sec, hz, apply_window
+                            )
+                        except ValueError:
+                            continue
+
+                        peak_idx = int(np.argmax(np.abs(ccf)))
+                        peak_lag = float(lags[peak_idx])
+                        peak_val = float(ccf[peak_idx])
+
+                        if peak_lag < 0:
+                            direction = f"{name_a}→{name_b}"
+                            driver_delta[name_a] = driver_delta.get(name_a, 0) + 1
+                        elif peak_lag > 0:
+                            direction = f"{name_b}→{name_a}"
+                            driver_delta[name_b] = driver_delta.get(name_b, 0) + 1
+                        else:
+                            direction = "synchronous"
+
+                        pairs.append({
+                            "modality_a": name_a,
+                            "modality_b": name_b,
+                            "feature_a": col_a,
+                            "feature_b": col_b,
+                            "peak_lag_sec": abs(peak_lag),
+                            "peak_ccf": peak_val,
+                            "direction": direction,
+                        })
+
+        results.append({
+            "window_start": t_start,
+            "window_end": t_end,
+            "window_center": t_center,
+            "pairs": pairs,
+            "driver_score": driver_delta,
+        })
+
+    return results
 
 
 # Re-export for convenience

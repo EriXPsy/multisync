@@ -110,13 +110,16 @@ class PredictionResult:
     mean_baseline_auc: float = 0.5
     mean_ar_baseline_auc: float = 0.5
     mean_delta_auc: float = 0.0
+    # --- Confidence intervals (bootstrap) ---
+    dynamic_auc_ci: Optional[Tuple[float, float]] = None   # [lower, upper]
+    delta_auc_ci: Optional[Tuple[float, float]] = None     # [lower, upper]
     folds: List[FoldResult] = field(default_factory=list)
     warning: Optional[str] = None  # e.g. "leakage suspected"
     n_features_used: int = 0  # how many of the 10 features were non-NaN
     diagnostics: Dict[str, Any] = field(default_factory=dict)  # VIF, multicollinearity, etc.
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d = {
             "source_pair": self.source_pair,
             "target_pair": self.target_pair,
             "mode": self.mode,
@@ -130,11 +133,24 @@ class PredictionResult:
             "diagnostics": self.diagnostics,
             "folds": [f.to_dict() for f in self.folds],
         }
+        if self.dynamic_auc_ci is not None:
+            d["dynamic_auc_ci"] = [float(self.dynamic_auc_ci[0]), float(self.dynamic_auc_ci[1])]
+        if self.delta_auc_ci is not None:
+            d["delta_auc_ci"] = [float(self.delta_auc_ci[0]), float(self.delta_auc_ci[1])]
+        return d
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "PredictionResult":
         """Deserialize from a dict (inverse of to_dict)."""
         folds = [FoldResult.from_dict(f) for f in d.get("folds", [])]
+        dynamic_auc_ci = None
+        if "dynamic_auc_ci" in d and d["dynamic_auc_ci"] is not None:
+            ci = d["dynamic_auc_ci"]
+            dynamic_auc_ci = (float(ci[0]), float(ci[1]))
+        delta_auc_ci = None
+        if "delta_auc_ci" in d and d["delta_auc_ci"] is not None:
+            ci = d["delta_auc_ci"]
+            delta_auc_ci = (float(ci[0]), float(ci[1]))
         return cls(
             source_pair=d.get("source_pair", ""),
             target_pair=d.get("target_pair", ""),
@@ -144,6 +160,8 @@ class PredictionResult:
             mean_baseline_auc=float(d.get("mean_baseline_auc", 0.5)),
             mean_ar_baseline_auc=float(d.get("mean_ar_baseline_auc", 0.5)),
             mean_delta_auc=float(d.get("mean_delta_auc", 0.0)),
+            dynamic_auc_ci=dynamic_auc_ci,
+            delta_auc_ci=delta_auc_ci,
             warning=d.get("warning"),
             n_features_used=int(d.get("n_features_used", 0)),
             diagnostics=d.get("diagnostics", {}),
@@ -378,8 +396,9 @@ def rolling_origin_cv(
         avg_features_used = 0
 
     if len(y) < max(3, n_splits):  # Lowered from max(5, n_splits) to accommodate smaller windows
-        # Debug output
-        print(f"DEBUG: len(y)={len(y)}, valid_mask sum={valid_mask.sum()}, all_nan_rows sum={all_nan_rows.sum()}")
+        logger.debug(
+            "Insufficient samples: len(y)=%d, n_splits=%d", len(y), n_splits
+        )
         return PredictionResult(
             source_pair=pair_name,
             target_pair=pair_name,
@@ -474,7 +493,7 @@ def rolling_origin_cv(
             valid_folds += 1
         except Exception as e:
             # Skip this fold - do NOT pretend AUC=0.5
-            print(f"DEBUG: Fold {fold_id} failed: {e}")
+            logger.debug("Fold %d failed: %s", fold_id, e)
             continue
 
         # Baseline: predict constant = training set positive rate
@@ -824,6 +843,12 @@ def cross_modal_prediction(
     mean_ar = np.mean([f.ar_baseline_auc for f in folds])
     mean_delta = np.mean([f.delta_auc for f in folds])
 
+    # Bootstrap 95% confidence intervals
+    dynamic_vals = [f.dynamic_auc for f in folds]
+    delta_vals = [f.delta_auc for f in folds]
+    dynamic_auc_ci = _bootstrap_ci(dynamic_vals)
+    delta_auc_ci = _bootstrap_ci(delta_vals)
+
     avg_coefs = feature_coefs_sum / valid_folds
     importance = {
         feature_names[i]: float(avg_coefs[i]) for i in range(len(feature_names))
@@ -844,11 +869,61 @@ def cross_modal_prediction(
         mean_baseline_auc=mean_baseline,
         mean_ar_baseline_auc=mean_ar,
         mean_delta_auc=mean_delta,
+        dynamic_auc_ci=dynamic_auc_ci,
+        delta_auc_ci=delta_auc_ci,
         folds=folds,
         warning=warning,
         n_features_used=avg_features_used,
         diagnostics=diagnostics,
     )
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap confidence intervals for CV metrics
+# ---------------------------------------------------------------------------
+
+def _bootstrap_ci(
+    values: List[float],
+    n_boot: int = 1000,
+    alpha: float = 0.05,
+    seed: int = 42,
+) -> Optional[Tuple[float, float]]:
+    """
+    Percentile bootstrap 95% confidence interval.
+
+    Resamples fold-level AUCs with replacement B times, computes the
+    mean of each bootstrap sample, and returns the [2.5%, 97.5%]
+    percentiles.
+
+    Parameters
+    ----------
+    values : list of float
+        Per-fold metric values (e.g., dynamic_auc from each fold).
+    n_boot : int
+        Number of bootstrap resamples.  Default 1000.
+    alpha : float
+        Significance level.  Default 0.05 → 95% CI.
+    seed : int
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    (lower, upper) tuple or None if fewer than 3 values.
+    """
+    if len(values) < 3:
+        return None
+
+    rng = np.random.default_rng(seed)
+    arr = np.array(values)
+    boot_means = np.empty(n_boot)
+
+    for b in range(n_boot):
+        sample = rng.choice(arr, size=len(arr), replace=True)
+        boot_means[b] = np.mean(sample)
+
+    lower = float(np.percentile(boot_means, 100 * alpha / 2))
+    upper = float(np.percentile(boot_means, 100 * (1 - alpha / 2)))
+    return (lower, upper)
 
 
 # ---------------------------------------------------------------------------

@@ -122,6 +122,83 @@ class AnalysisResults:
             "parameters": self.parameters,
         }
 
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "AnalysisResults":
+        """Deserialize from a dict (inverse of to_dict).
+        
+        Restores nested objects (DynamicFeatures, PredictionResult, etc.)
+        from their dict representations.
+        """
+        # Restore dynamic_features: Dict[str, Dict] -> Dict[str, DynamicFeatures]
+        dyn_feat = {}
+        for k, v in d.get("dynamic_features", {}).items():
+            if isinstance(v, DynamicFeatures):
+                dyn_feat[k] = v
+            else:
+                dyn_feat[k] = DynamicFeatures.from_dict(v)
+
+        # Restore dynamic_features_segmented: {label: {pair: feat_dict}}
+        dyn_seg = {}
+        for label, pairs in d.get("dynamic_features_segmented", {}).items():
+            dyn_seg[label] = {}
+            for pair, feat in pairs.items():
+                if isinstance(feat, DynamicFeatures):
+                    dyn_seg[label][pair] = feat
+                else:
+                    dyn_seg[label][pair] = DynamicFeatures.from_dict(feat)
+
+        # Restore prediction: Dict[str, Dict] -> Dict[str, PredictionResult]
+        pred = {}
+        for k, v in d.get("prediction", {}).items():
+            if isinstance(v, PredictionResult):
+                pred[k] = v
+            else:
+                pred[k] = PredictionResult.from_dict(v)
+
+        # Restore cross_modal_prediction
+        cross_pred = {}
+        for k, v in d.get("cross_modal_prediction", {}).items():
+            if isinstance(v, PredictionResult):
+                cross_pred[k] = v
+            else:
+                cross_pred[k] = PredictionResult.from_dict(v)
+
+        # Restore cca_results: List[Dict] -> List[CCAResult]
+        cca = []
+        for r in d.get("cca_results", []):
+            if isinstance(r, CCAResult):
+                cca.append(r)
+            else:
+                cca.append(CCAResult.from_dict(r))
+
+        # Restore cascade_edges: List[Dict] -> List[CascadeEdge]
+        edges = []
+        for e in d.get("cascade_edges", []):
+            if isinstance(e, CascadeEdge):
+                edges.append(e)
+            else:
+                edges.append(CascadeEdge.from_dict(e))
+
+        return cls(
+            dyad_id=d.get("dyad_id", "unknown"),
+            dynamic_features=dyn_feat,
+            dynamic_features_segmented=dyn_seg,
+            cca_results=cca,
+            cascade_edges=edges,
+            cascade_graph=d.get("cascade_graph", {}),
+            prediction=pred,
+            cross_modal_prediction=cross_pred,
+            score_view=d.get("score_view", []),
+            diagnostics=d.get("diagnostics", []),
+            parameters=d.get("parameters", {}),
+        )
+
+    @classmethod
+    def from_json(cls, json_str: str) -> "AnalysisResults":
+        """Deserialize from a JSON string."""
+        import json
+        return cls.from_dict(json.loads(json_str))
+
     def export_viewer_json(self, filepath: str) -> str:
         """
         Export viewer-ready JSON.

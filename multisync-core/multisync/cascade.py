@@ -47,18 +47,53 @@ class CCAResult:
     null_peak_ccf: Optional[np.ndarray] = None  # surrogates' peak CCFs
 
     def to_dict(self) -> Dict[str, Any]:
+        # Convert arrays to lists for JSON serialization
+        lags_sec_list = self.lags_sec.tolist() if len(self.lags_sec) > 0 else []
+        ccf_list = self.ccf_values.tolist() if len(self.ccf_values) > 0 else []
+        null_peaks = self.null_peak_ccf.tolist() if self.null_peak_ccf is not None and len(self.null_peak_ccf) > 0 else None
         return {
             "modality_a": self.modality_a,
             "modality_b": self.modality_b,
             "feature_a": self.feature_a,
             "feature_b": self.feature_b,
+            "lags_sec": lags_sec_list,
+            "ccf_values": ccf_list,
             "peak_lag_sec": float(self.peak_lag_sec),
             "peak_ccf": float(self.peak_ccf),
             "direction": self.direction,
             "is_significant": self.is_significant,
             "p_value": float(self.p_value),
             "surrogate_n": self.surrogate_n,
+            "null_peak_ccf": null_peaks,
         }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "CCAResult":
+        """Deserialize from a dict (inverse of to_dict)."""
+        lags = np.array(d.get("lags_sec", []), dtype=float)
+        ccf = np.array(d.get("ccf_values", []), dtype=float)
+        null_peaks = np.array(d["null_peak_ccf"], dtype=float) if d.get("null_peak_ccf") is not None else None
+        return cls(
+            modality_a=d.get("modality_a", ""),
+            modality_b=d.get("modality_b", ""),
+            feature_a=d.get("feature_a", ""),
+            feature_b=d.get("feature_b", ""),
+            lags_sec=lags,
+            ccf_values=ccf,
+            peak_lag_sec=float(d.get("peak_lag_sec", 0.0)),
+            peak_ccf=float(d.get("peak_ccf", 0.0)),
+            direction=d.get("direction", ""),
+            is_significant=bool(d.get("is_significant", False)),
+            p_value=float(d.get("p_value", 1.0)),
+            surrogate_n=int(d.get("surrogate_n", 0)),
+            null_peak_ccf=null_peaks,
+        )
+
+    @classmethod
+    def from_json(cls, json_str: str) -> "CCAResult":
+        """Deserialize from a JSON string."""
+        import json
+        return cls.from_dict(json.loads(json_str))
 
 
 @dataclass
@@ -82,6 +117,25 @@ class CascadeEdge:
             "is_significant": self.is_significant,
             "polarity": self.polarity,
         }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "CascadeEdge":
+        """Deserialize from a dict (inverse of to_dict)."""
+        return cls(
+            source=d.get("source", ""),
+            target=d.get("target", ""),
+            lag_sec=float(d.get("lag_sec", 0.0)),
+            ccf_value=float(d.get("ccf_value", 0.0)),
+            p_value=float(d.get("p_value", 1.0)),
+            is_significant=bool(d.get("is_significant", False)),
+            polarity=d.get("polarity", "positive"),
+        )
+
+    @classmethod
+    def from_json(cls, json_str: str) -> "CascadeEdge":
+        """Deserialize from a JSON string."""
+        import json
+        return cls.from_dict(json.loads(json_str))
 
 
 # ---------------------------------------------------------------------------

@@ -43,7 +43,8 @@ def sliding_window_wcc(
     Compute sliding-window cross-correlation (WCC) between x and y.
 
     For each window position, computes Pearson correlation within the window.
-    Vectorized implementation using stride tricks.
+    Uses cumsum-based O(n) memory implementation when there are no NaN values;
+    falls back to stride_tricks (O(n*w) memory) when NaN values are present.
 
     Parameters
     ----------
@@ -79,11 +80,97 @@ def sliding_window_wcc(
     else:
         y_lagged = y
 
-    # Use stride tricks for vectorized windowing
+    # --- Strategy selection ---
+    if np.isnan(x).any() or np.isnan(y_lagged).any():
+        # Fallback: stride_tricks (original method)
+        # Warn if memory usage would be excessive
+        mem_estimate = (n - window_size + 1) * window_size * 8 * 4  # 4 arrays, 8 bytes per float64
+        if mem_estimate > 1e9:  # > 1GB
+            logger.warning(
+                f"sliding_window_wcc: large memory estimate ({mem_estimate/1e9:.1f} GB) "
+                f"due to NaN values forcing stride_tricks fallback. "
+                f"Consider filling NaN before calling this function."
+            )
+        return _sliding_window_wcc_stride(x, y_lagged, window_size)
+    else:
+        # Fast path: cumsum-based O(n) memory
+        return _sliding_window_wcc_cumsum(x, y_lagged, window_size)
+
+
+def _sliding_window_wcc_cumsum(
+    x: np.ndarray,
+    y: np.ndarray,
+    window_size: int,
+) -> np.ndarray:
+    """
+    Cumsum-based sliding-window Pearson correlation.
+    Assumes no NaN values in x or y.
+    Memory: O(n) instead of O(n*w).
+    """
+    n = len(x)
+    # Pad cumsum with leading 0 for easier window sum computation
+    cumsum_x = np.cumsum(x)
+    cumsum_y = np.cumsum(y)
+    cumsum_xy = np.cumsum(x * y)
+    cumsum_x2 = np.cumsum(x ** 2)
+    cumsum_y2 = np.cumsum(y ** 2)
+
+    # Pad with 0 at the beginning
+    cumsum_x = np.concatenate([[0.0], cumsum_x])
+    cumsum_y = np.concatenate([[0.0], cumsum_y])
+    cumsum_xy = np.concatenate([[0.0], cumsum_xy])
+    cumsum_x2 = np.concatenate([[0.0], cumsum_x2])
+    cumsum_y2 = np.concatenate([[0.0], cumsum_y2])
+
+    # Window indices: i = 0 .. n-window_size
+    i = np.arange(n - window_size + 1)
+    i_end = i + window_size
+
+    sum_x = cumsum_x[i_end] - cumsum_x[i]
+    sum_y = cumsum_y[i_end] - cumsum_y[i]
+    sum_xy = cumsum_xy[i_end] - cumsum_xy[i]
+    sum_x2 = cumsum_x2[i_end] - cumsum_x2[i]
+    sum_y2 = cumsum_y2[i_end] - cumsum_y2[i]
+
+    w = float(window_size)
+    mean_x = sum_x / w
+    mean_y = sum_y / w
+
+    # Variance: E[X^2] - E[X]^2
+    var_x = (sum_x2 / w) - mean_x ** 2
+    var_y = (sum_y2 / w) - mean_y ** 2
+
+    # Covariance: E[XY] - E[X]E[Y]
+    cov = (sum_xy / w) - mean_x * mean_y
+
+    # Pearson r = cov / (std_x * std_y)
+    # Handle numerical errors: var could be slightly negative
+    var_x = np.maximum(var_x, 0.0)
+    var_y = np.maximum(var_y, 0.0)
+    std_x = np.sqrt(var_x)
+    std_y = np.sqrt(var_y)
+
+    denom = std_x * std_y
+    wcc = np.full_like(sum_x, np.nan)
+    valid = denom > 1e-10
+    wcc[valid] = cov[valid] / denom[valid]
+
+    return np.clip(wcc, -1.0, 1.0)
+
+
+def _sliding_window_wcc_stride(
+    x: np.ndarray,
+    y: np.ndarray,
+    window_size: int,
+) -> np.ndarray:
+    """
+    Original stride_tricks implementation (O(n*w) memory).
+    Handles NaN by masking windows that contain any NaN.
+    """
     from numpy.lib.stride_tricks import sliding_window_view
 
     x_windows = sliding_window_view(x, window_size)  # shape (n-w+1, w)
-    y_windows = sliding_window_view(y_lagged, window_size)
+    y_windows = sliding_window_view(y, window_size)
 
     # Pearson correlation per window
     x_means = x_windows.mean(axis=1, keepdims=True)
@@ -144,6 +231,28 @@ class DynamicFeatures:
             "mean_synchrony": self.mean_synchrony,
             "synchrony_entropy": self.synchrony_entropy,
         }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, float]) -> "DynamicFeatures":
+        """Deserialize from a dict (inverse of to_dict)."""
+        return cls(
+            onset_latency=float(d.get("onset_latency", np.nan)),
+            onset_amplitude=float(d.get("onset_amplitude", np.nan)),
+            build_up_rate=float(d.get("build_up_rate", np.nan)),
+            build_up_slope=float(d.get("build_up_slope", np.nan)),
+            peak_amplitude=float(d.get("peak_amplitude", np.nan)),
+            peak_duration=float(d.get("peak_duration", np.nan)),
+            breakdown_rate=float(d.get("breakdown_rate", np.nan)),
+            recovery_time=float(d.get("recovery_time", np.nan)),
+            mean_synchrony=float(d.get("mean_synchrony", np.nan)),
+            synchrony_entropy=float(d.get("synchrony_entropy", np.nan)),
+        )
+
+    @classmethod
+    def from_json(cls, json_str: str) -> "DynamicFeatures":
+        """Deserialize from a JSON string."""
+        import json
+        return cls.from_dict(json.loads(json_str))
 
 
 # ---------------------------------------------------------------------------

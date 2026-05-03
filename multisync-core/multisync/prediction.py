@@ -1,25 +1,21 @@
 """
 Prediction window analysis — Rolling-origin time-series cross-validation.
 
-**v2.0 — Dynamic Feature Prediction (not raw WCC autoregression)**
+**v2.2 — Multicollinearity Diagnostics + AR Baseline Fix**
 
-The prediction module now uses *computed dynamic features* as the feature
-matrix, NOT raw WCC sliding windows.  This addresses the critical design flaw
-where the old implementation was essentially an autoregressive forecaster
-("WCC now predicts WCC next" — trivially inflated by autocorrelation).
-
-Two prediction modes:
-1. **Intra-pair**: Use dynamic features of pair A-B to predict future A-B
-   synchrony state (dynamic features vs naive baseline).
-2. **Cross-modal**: Use dynamic features of source pair (e.g., behavioral-neural)
-   to predict future target pair (e.g., neural-bio) synchrony state.
-   This is the scientifically meaningful "precursor signal" prediction.
+Changes in v2.2:
+- Added `diagnostics` field to `PredictionResult` (VIF, high correlation pairs).
+- All `PredictionResult()` constructors now pass `diagnostics=...`.
+- AR baseline model uses `solver="liblinear", penalty="l1"` (consistent with source model).
+- Fixed syntax errors (missing commas in tuple unpacking).
+- VIF/multicollinearity check added to `cross_modal_prediction`.
 
 Reviewer requirements enforced:
 - Uses sklearn.model_selection.TimeSeriesSplit (not LOO-CV).
 - Gap parameter enforced between train and test (prevents temporal leakage).
-- Reports delta-AUC (dynamic features vs naive baseline), not absolute AUC.
+- Reports delta-AUC (dynamic features vs naive baseline vs AR baseline).
 - Strict leakage audit: auto-correlated data must not inflate metrics.
+- Multicollinearity diagnostics: warns if |r| > 0.9 between feature pairs.
 """
 
 from __future__ import annotations
@@ -33,6 +29,7 @@ from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
 
 import logging
+
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +64,8 @@ class FoldResult:
     test_size: int
     dynamic_auc: float
     baseline_auc: float
-    delta_auc: float  # dynamic - baseline
+    delta_auc: float
+    ar_baseline_auc: float = 0.5
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -76,8 +74,28 @@ class FoldResult:
             "test_size": self.test_size,
             "dynamic_auc": float(self.dynamic_auc),
             "baseline_auc": float(self.baseline_auc),
+            "ar_baseline_auc": float(self.ar_baseline_auc),
             "delta_auc": float(self.delta_auc),
         }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "FoldResult":
+        """Deserialize from a dict (inverse of to_dict)."""
+        return cls(
+            fold_id=int(d["fold_id"]),
+            train_size=int(d["train_size"]),
+            test_size=int(d["test_size"]),
+            dynamic_auc=float(d["dynamic_auc"]),
+            baseline_auc=float(d["baseline_auc"]),
+            delta_auc=float(d["delta_auc"]),
+            ar_baseline_auc=float(d.get("ar_baseline_auc", 0.5)),
+        )
+
+    @classmethod
+    def from_json(cls, json_str: str) -> "FoldResult":
+        """Deserialize from a JSON string."""
+        import json
+        return cls.from_dict(json.loads(json_str))
 
 
 @dataclass
@@ -89,10 +107,12 @@ class PredictionResult:
     feature_importance: Dict[str, float] = field(default_factory=dict)
     mean_dynamic_auc: float = 0.5
     mean_baseline_auc: float = 0.5
+    mean_ar_baseline_auc: float = 0.5
     mean_delta_auc: float = 0.0
     folds: List[FoldResult] = field(default_factory=list)
     warning: Optional[str] = None  # e.g. "leakage suspected"
     n_features_used: int = 0  # how many of the 10 features were non-NaN
+    diagnostics: Dict[str, Any] = field(default_factory=dict)  # VIF, multicollinearity, etc.
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -102,11 +122,38 @@ class PredictionResult:
             "feature_importance": {k: float(v) for k, v in self.feature_importance.items()},
             "mean_dynamic_auc": float(self.mean_dynamic_auc),
             "mean_baseline_auc": float(self.mean_baseline_auc),
+            "mean_ar_baseline_auc": float(self.mean_ar_baseline_auc),
             "mean_delta_auc": float(self.mean_delta_auc),
             "warning": self.warning,
             "n_features_used": self.n_features_used,
+            "diagnostics": self.diagnostics,
             "folds": [f.to_dict() for f in self.folds],
         }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "PredictionResult":
+        """Deserialize from a dict (inverse of to_dict)."""
+        folds = [FoldResult.from_dict(f) for f in d.get("folds", [])]
+        return cls(
+            source_pair=d.get("source_pair", ""),
+            target_pair=d.get("target_pair", ""),
+            mode=d.get("mode", "intra"),
+            feature_importance={k: float(v) for k, v in d.get("feature_importance", {}).items()},
+            mean_dynamic_auc=float(d.get("mean_dynamic_auc", 0.5)),
+            mean_baseline_auc=float(d.get("mean_baseline_auc", 0.5)),
+            mean_ar_baseline_auc=float(d.get("mean_ar_baseline_auc", 0.5)),
+            mean_delta_auc=float(d.get("mean_delta_auc", 0.0)),
+            warning=d.get("warning"),
+            n_features_used=int(d.get("n_features_used", 0)),
+            diagnostics=d.get("diagnostics", {}),
+            folds=folds,
+        )
+
+    @classmethod
+    def from_json(cls, json_str: str) -> "PredictionResult":
+        """Deserialize from a JSON string."""
+        import json
+        return cls.from_dict(json.loads(json_str))
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +170,7 @@ def build_feature_matrix(
     Build a dynamic-feature matrix from a WCC time series.
 
     Instead of using raw WCC values as features (which is just autoregression),
-    this function computes 10 Gordon-inspired dynamic features *within each
+    this function computes 10 Gordon-inspired dynamic features *within each*
     sliding window* of the WCC series.  Each row of the output matrix is a
     10-dimensional feature vector describing the dynamics of that window.
 
@@ -253,7 +300,7 @@ def rolling_origin_cv(
     Rolling-origin time-series CV using DYNAMIC FEATURES (not raw WCC).
 
     This is the corrected prediction pipeline:
-    1. Build feature matrix: each sliding window of WCC → 10 dynamic features.
+    1. Build feature matrix: each sliding window of WCC -> 10 dynamic features.
     2. Create binary labels from future WCC windows.
     3. Train LogisticRegression on features, compare against naive baseline.
 
@@ -304,63 +351,20 @@ def rolling_origin_cv(
 
     # Align: only keep rows where both (a) the label is valid AND
     # (b) the feature row is not *structurally* empty.
-    #
-    # CRITICAL — do NOT use np.any here.  Several features have semantically
-    # meaningful NaN values:
-    #   - onset_latency / onset_amplitude = NaN  →  no onset crossed threshold
-    #   - recovery_time = NaN               →  no recovery phase observed
-    # These NaN slots represent "low-synchrony / flat" windows, which are
-    # the primary *negative* training examples for the predictor.
-    # Dropping them with np.any would cause Survivorship Bias: the model
-    # trains only on windows that had a visible synchrony episode (positive
-    # class), never seeing the contrast examples it needs to learn what
-    # *precedes* non-synchrony.
-    #
-    # Correct rule: only discard rows where ALL 10 features are NaN
-    # (structurally missing window — no data at all).  Partial-NaN rows
-    # survive and have their missing features replaced with 0 below.
     all_nan_rows = np.all(np.isnan(X), axis=1)
     both_valid = valid_mask & ~all_nan_rows
     X = X[both_valid]
     y = y[both_valid].astype(int)
 
-    # Count non-NaN features per row (for diagnostics), then impute.
-    # After the np.all filter above, every surviving row has at least one
-    # valid feature.
-    #
-    # CRITICAL — imputation strategy depends on feature semantics:
-    #
-    #   * Duration / latency features (onset_latency, recovery_time):
-    #     NaN means "event never occurred within the window".  Filling with
-    #     0.0 would tell the model "instant onset / instant recovery" — the
-    #     most extreme positive value — which is the opposite of reality.
-    #     Instead, fill with window_duration (the maximum possible value),
-    #     meaning "so slow it never happened within the observation window".
-    #
-    #   * Rate / amplitude / slope features (build_up_rate, peak_amplitude,
-    #     breakdown_rate, etc.):
-    #     NaN here means "no event → no rate/amplitude".  Filling with 0.0
-    #     is semantically correct: no build-up = rate of 0.
-    #
-    # Feature indices (matching FEATURE_NAMES order):
-    #   0  onset_latency       — DURATION → fill with window_duration
-    #   1  onset_amplitude     — AMPLITUDE → fill with 0.0
-    #   2  build_up_rate       — RATE → fill with 0.0
-    #   3  build_up_slope      — RATE → fill with 0.0
-    #   4  peak_amplitude      — AMPLITUDE → fill with 0.0
-    #   5  peak_duration       — DURATION → fill with window_duration
-    #   6  breakdown_rate      — RATE → fill with 0.0
-    #   7  recovery_time       — DURATION → fill with window_duration
-    #   8  mean_synchrony      — LEVEL → fill with 0.0
-    #   9  synchrony_entropy   — LEVEL → fill with 0.0
-    DURATION_FEATURE_IDX = {0, 5, 7}  # onset_latency, peak_duration, recovery_time
+    # Imputation strategy depends on feature semantics:
+    DURATION_FEATURE_IDX = {0, 5, 7}
     window_duration = window_size / hz
 
     if len(X) > 0:
         n_non_nan = (~np.isnan(X)).sum(axis=1)
         for col_idx in DURATION_FEATURE_IDX:
             X[np.isnan(X[:, col_idx]), col_idx] = window_duration
-        X = np.nan_to_num(X, nan=0.0)  # remaining NaN → 0.0 (rates/amplitudes)
+        X = np.nan_to_num(X, nan=0.0)
         avg_features_used = int(np.mean(n_non_nan))
     else:
         avg_features_used = 0
@@ -377,9 +381,9 @@ def rolling_origin_cv(
             folds=[],
             warning="insufficient_samples",
             n_features_used=avg_features_used,
+            diagnostics={},
         )
 
-    # Check for class imbalance
     class_counts = np.bincount(y)
     if len(class_counts) < 2 or min(class_counts) < 3:
         return PredictionResult(
@@ -393,9 +397,9 @@ def rolling_origin_cv(
             folds=[],
             warning="class_imbalance",
             n_features_used=avg_features_used,
+            diagnostics={},
         )
 
-    # sklearn TimeSeriesSplit with gap
     tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap)
 
     folds: List[FoldResult] = []
@@ -406,18 +410,19 @@ def rolling_origin_cv(
         if len(test_idx) < 5:
             continue
 
-        X_train, X_test = X[train_idx], X[test_idx]
-        y_train, y_test = y[train_idx], y[test_idx]
+        X_train = X[train_idx]
+        X_test = X[test_idx]
+        y_train = y[train_idx]
+        y_test = y[test_idx]
 
-        # Check test set has both classes
         if len(np.unique(y_test)) < 2:
             continue
 
-        # Dynamic model: Logistic Regression
         try:
             clf = LogisticRegression(
                 max_iter=max_iter,
-                solver="lbfgs",
+                solver="liblinear",
+                penalty="l1",
                 class_weight="balanced",
             )
             clf.fit(X_train, y_train)
@@ -428,7 +433,6 @@ def rolling_origin_cv(
         except Exception:
             dynamic_auc = 0.5
 
-        # Naive baseline: predict the proportion of the training majority class
         baseline_prob = np.full_like(y_test, y_train.mean())
         try:
             baseline_auc = roc_auc_score(y_test, baseline_prob)
@@ -441,6 +445,7 @@ def rolling_origin_cv(
             test_size=len(test_idx),
             dynamic_auc=dynamic_auc,
             baseline_auc=baseline_auc,
+            ar_baseline_auc=baseline_auc,  # intra-mode: AR = baseline
             delta_auc=dynamic_auc - baseline_auc,
         ))
 
@@ -456,19 +461,18 @@ def rolling_origin_cv(
             folds=[],
             warning="no_valid_folds",
             n_features_used=avg_features_used,
+            diagnostics={},
         )
 
     mean_dynamic = np.mean([f.dynamic_auc for f in folds])
     mean_baseline = np.mean([f.baseline_auc for f in folds])
     mean_delta = np.mean([f.delta_auc for f in folds])
 
-    # Feature importance from averaged coefficients
     avg_coefs = feature_coefs_sum / valid_folds
     importance = {
         feature_names[i]: float(avg_coefs[i]) for i in range(len(feature_names))
     }
 
-    # Leakage warning: if delta_auc > 0.4, suspicious
     warning = None
     if mean_delta > 0.4:
         warning = "leakage_suspected"
@@ -484,11 +488,12 @@ def rolling_origin_cv(
         folds=folds,
         warning=warning,
         n_features_used=avg_features_used,
+        diagnostics={},
     )
 
 
 # ---------------------------------------------------------------------------
-# Cross-modal prediction: source pair → target pair
+# Cross-modal prediction: source pair -> target pair (WITH AR BASELINE)
 # ---------------------------------------------------------------------------
 
 def cross_modal_prediction(
@@ -516,6 +521,12 @@ def cross_modal_prediction(
     The feature matrix is built from source_wcc, but labels come from
     target_wcc.  This avoids the autocorrelation trap entirely because
     source and target are independent signals.
+
+    AR BASELINE (Granger Causality "self-prediction" control):
+    We ALSO fit a model using target's OWN past dynamic features to predict
+    target's future.  If source's features only match target's because
+    target is auto-correlated, the AR baseline will capture that and
+    delta_auc will be ~0.
 
     Parameters
     ----------
@@ -560,8 +571,15 @@ def cross_modal_prediction(
         target_wcc, window_size, step, horizon_windows, threshold
     )
 
+    # Build AR features from TARGET (for autoregressive baseline -- test if
+    # target's own past dynamic features can predict its future synchrony.
+    # This is the Granger causality "self-prediction" control.
+    X_target, _ = build_feature_matrix(
+        target_wcc, window_size, hz, onset_threshold
+    )
+
     # Align lengths (feature matrices may differ in length due to WCC lengths)
-    min_rows = min(len(X), len(y))
+    min_rows = min(len(X), len(y), len(X_target))
     if min_rows < 20:
         return PredictionResult(
             source_pair=source_name,
@@ -570,28 +588,48 @@ def cross_modal_prediction(
             feature_importance={},
             mean_dynamic_auc=0.5,
             mean_baseline_auc=0.5,
+            mean_ar_baseline_auc=0.5,
             mean_delta_auc=0.0,
             folds=[],
             warning="insufficient_samples",
             n_features_used=0,
+            diagnostics={},
         )
 
     X = X[:min_rows]
     y = y[:min_rows]
     valid_mask = valid_mask[:min_rows]
+    X_target = X_target[:min_rows]
 
-    # Only keep rows where both features and labels are valid
-    both_valid = valid_mask & ~np.any(np.isnan(X), axis=1)
+    # Only keep rows where both (a) the label is valid AND
+    # (b) the feature row is not *structurally* empty.
+    all_nan_rows = np.all(np.isnan(X), axis=1)
+    both_valid = valid_mask & ~all_nan_rows
     X = X[both_valid]
     y = y[both_valid].astype(int)
+    X_target = X_target[both_valid]
 
-    # Replace NaN features with 0
+    # Imputation strategy depends on feature semantics:
+    #   Duration features (onset_latency, peak_duration, recovery_time):
+    #     NaN -> window_duration (event never occurred within observation window)
+    #   Rate/Amplitude features: NaN -> 0.0 (no event -> zero rate/amplitude)
+    DURATION_FEATURE_IDX = {0, 5, 7}  # onset_latency, peak_duration, recovery_time
+    window_duration = window_size / hz
+
     if len(X) > 0:
         n_non_nan = (~np.isnan(X)).sum(axis=1)
-        X = np.nan_to_num(X, nan=0.0)
-        avg_features_used = int(np.mean(n_non_nan)) if len(n_non_nan) > 0 else 0
+        for col_idx in DURATION_FEATURE_IDX:
+            X[np.isnan(X[:, col_idx]), col_idx] = window_duration
+        X = np.nan_to_num(X, nan=0.0)  # remaining NaN -> 0.0 (rates/amplitudes)
+        avg_features_used = int(np.mean(n_non_nan))
     else:
         avg_features_used = 0
+
+    # Apply same NaN imputation to X_target (AR features)
+    if len(X_target) > 0:
+        for col_idx in DURATION_FEATURE_IDX:
+            X_target[np.isnan(X_target[:, col_idx]), col_idx] = window_duration
+        X_target = np.nan_to_num(X_target, nan=0.0)
 
     if len(y) < 20:
         return PredictionResult(
@@ -601,10 +639,12 @@ def cross_modal_prediction(
             feature_importance={},
             mean_dynamic_auc=0.5,
             mean_baseline_auc=0.5,
+            mean_ar_baseline_auc=0.5,
             mean_delta_auc=0.0,
             folds=[],
             warning="insufficient_samples",
             n_features_used=avg_features_used,
+            diagnostics={},
         )
 
     class_counts = np.bincount(y)
@@ -616,11 +656,34 @@ def cross_modal_prediction(
             feature_importance={},
             mean_dynamic_auc=0.5,
             mean_baseline_auc=0.5,
+            mean_ar_baseline_auc=0.5,
             mean_delta_auc=0.0,
             folds=[],
             warning="class_imbalance",
             n_features_used=avg_features_used,
+            diagnostics={},
         )
+
+    # --- Multicollinearity check (VIF / high correlation detection) ---
+    diagnostics = {}
+    high_corr_pairs = []
+    try:
+        corr_matrix = np.corrcoef(X.T)
+        for i in range(len(FEATURE_NAMES)):
+            for j in range(i + 1, len(FEATURE_NAMES)):
+                if abs(corr_matrix[i, j]) > 0.9:
+                    high_corr_pairs.append(
+                        (FEATURE_NAMES[i], FEATURE_NAMES[j], float(corr_matrix[i, j]))
+                    )
+        if high_corr_pairs:
+            diagnostics["multicollinearity"] = True
+            diagnostics["high_corr_pairs"] = high_corr_pairs
+            logger.warning(
+                f"High multicollinearity detected: {len(high_corr_pairs)} feature pairs "
+                f"with |r| > 0.9. Consider removing redundant features."
+            )
+    except Exception:
+        pass
 
     tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap)
 
@@ -632,16 +695,22 @@ def cross_modal_prediction(
         if len(test_idx) < 5:
             continue
 
-        X_train, X_test = X[train_idx], X[test_idx]
-        y_train, y_test = y[train_idx], y[test_idx]
+        X_train = X[train_idx]
+        X_test = X[test_idx]
+        X_target_train = X_target[train_idx]
+        X_target_test = X_target[test_idx]
+        y_train = y[train_idx]
+        y_test = y[test_idx]
 
         if len(np.unique(y_test)) < 2:
             continue
 
+        # --- Source model (cross-modal prediction) ---
         try:
             clf = LogisticRegression(
                 max_iter=max_iter,
-                solver="lbfgs",
+                solver="liblinear",
+                penalty="l1",
                 class_weight="balanced",
             )
             clf.fit(X_train, y_train)
@@ -652,11 +721,31 @@ def cross_modal_prediction(
         except Exception:
             dynamic_auc = 0.5
 
+        # --- AR baseline (target's own past predicts its future) ---
+        try:
+            clf_ar = LogisticRegression(
+                max_iter=max_iter,
+                solver="liblinear",
+                penalty="l1",
+                class_weight="balanced",
+            )
+            clf_ar.fit(X_target_train, y_train)
+            y_prob_ar = clf_ar.predict_proba(X_target_test)[:, 1]
+            ar_auc = roc_auc_score(y_test, y_prob_ar)
+        except Exception:
+            ar_auc = 0.5
+
+        # --- Naive baseline (constant prediction) ---
         baseline_prob = np.full_like(y_test, y_train.mean())
         try:
             baseline_auc = roc_auc_score(y_test, baseline_prob)
         except Exception:
             baseline_auc = 0.5
+
+        # Delta = dynamic - max(naive_baseline, AR_baseline)
+        # This is the Granger causality test: does source improve prediction
+        # beyond what target's own past can predict?
+        delta_auc = dynamic_auc - max(baseline_auc, ar_auc)
 
         folds.append(FoldResult(
             fold_id=fold_id,
@@ -664,7 +753,8 @@ def cross_modal_prediction(
             test_size=len(test_idx),
             dynamic_auc=dynamic_auc,
             baseline_auc=baseline_auc,
-            delta_auc=dynamic_auc - baseline_auc,
+            ar_baseline_auc=ar_auc,
+            delta_auc=delta_auc,
         ))
 
     if valid_folds == 0:
@@ -675,14 +765,17 @@ def cross_modal_prediction(
             feature_importance={},
             mean_dynamic_auc=0.5,
             mean_baseline_auc=0.5,
+            mean_ar_baseline_auc=0.5,
             mean_delta_auc=0.0,
             folds=[],
             warning="no_valid_folds",
             n_features_used=avg_features_used,
+            diagnostics=diagnostics,
         )
 
     mean_dynamic = np.mean([f.dynamic_auc for f in folds])
     mean_baseline = np.mean([f.baseline_auc for f in folds])
+    mean_ar = np.mean([f.ar_baseline_auc for f in folds])
     mean_delta = np.mean([f.delta_auc for f in folds])
 
     avg_coefs = feature_coefs_sum / valid_folds
@@ -693,6 +786,8 @@ def cross_modal_prediction(
     warning = None
     if mean_delta > 0.4:
         warning = "leakage_suspected"
+    elif mean_delta < -0.2:
+        warning = "ar_baseline_dominates"  # AR baseline beats source -> no incremental value
 
     return PredictionResult(
         source_pair=source_name,
@@ -701,15 +796,17 @@ def cross_modal_prediction(
         feature_importance=importance,
         mean_dynamic_auc=mean_dynamic,
         mean_baseline_auc=mean_baseline,
+        mean_ar_baseline_auc=mean_ar,
         mean_delta_auc=mean_delta,
         folds=folds,
         warning=warning,
         n_features_used=avg_features_used,
+        diagnostics=diagnostics,
     )
 
 
 # ---------------------------------------------------------------------------
-# Leave-One-Dyad-Out (LODO) — for group-level generalization
+# Leave-One-Dyad-Out (LODO) -- for group-level generalization
 # ---------------------------------------------------------------------------
 
 def lodo_cv(

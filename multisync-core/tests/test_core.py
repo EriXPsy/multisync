@@ -368,16 +368,20 @@ class TestPrediction:
             assert pred.warning == "leakage_suspected"
 
     def test_leakage_audit_random_noise(self):
-        """Random noise should give AUC near 0.5."""
+        """Random noise should give AUC near 0.5 (no leakage possible)."""
         from multisync.prediction import rolling_origin_cv
         np.random.seed(42)
-        # Use longer series (800 samples) for more stable AUC estimation
-        noise = np.random.randn(800)
+        # Use MUCH longer series to ensure stable AUC estimation
+        noise = np.random.randn(2000)
         pred = rolling_origin_cv(
-            noise, window_size=20, hz=1.0, n_splits=3, gap=2
+            noise, window_size=60, hz=1.0, n_splits=3, gap=2, threshold=0.0
         )
-        # Random noise → AUC should be near 0.5
-        assert abs(pred.mean_dynamic_auc - 0.5) < 0.3  # Relaxed from 0.2 to 0.3
+        # Random noise → AUC must be VERY close to 0.5
+        assert len(pred.folds) > 0, "Should have at least one valid fold"
+        assert abs(pred.mean_dynamic_auc - 0.5) < 0.1, (
+            f"Random noise AUC should be near 0.5, got {pred.mean_dynamic_auc:.3f}. "
+            f"This indicates leakage or overfitting."
+        )
 
     def test_cross_modal_prediction_basic(self):
         """Cross-modal prediction: source and target are independent signals."""

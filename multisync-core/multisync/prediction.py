@@ -394,27 +394,6 @@ def rolling_origin_cv(
             diagnostics={},
         )
 
-    # --- Auto-adjust gap and n_splits to prevent TimeSeriesSplit ValueError ---
-    n_samples = len(X)
-    est_test_size = max(1, n_samples // (n_splits + 1))
-    min_gap = n_samples - est_test_size * n_splits - 1
-
-    if min_gap < 0:
-        # Need to reduce n_splits
-        n_splits = max(2, n_samples - 2)  # Ensure at least 2 folds
-        est_test_size = max(1, n_samples // (n_splits + 1))
-        min_gap = n_samples - est_test_size * n_splits - 1
-        warnings.warn(
-            f"n_splits adjusted to {n_splits} due to small sample size (n_samples={n_samples})"
-        )
-
-    if gap > min_gap:
-        old_gap = gap
-        gap = max(0, min_gap)
-        warnings.warn(
-            f"gap adjusted from {old_gap} to {gap} due to small sample size (n_samples={n_samples})"
-        )
-
     class_counts = np.bincount(y)
     if len(class_counts) < 2 or min(class_counts) < 3:
         return PredictionResult(
@@ -431,25 +410,31 @@ def rolling_origin_cv(
             diagnostics={},
         )
 
-    # --- Auto-adjust gap and n_splits to prevent TimeSeriesSplit ValueError ---
+    # --- Hard check: refuse to run if data is insufficient for CV ---
     n_samples = len(X)
     est_test_size = max(1, n_samples // (n_splits + 1))
     min_gap = n_samples - est_test_size * n_splits - 1
 
-    if min_gap < 0:
-        # Need to reduce n_splits
-        n_splits = max(2, n_samples - 2)  # Ensure at least 2 folds
-        est_test_size = max(1, n_samples // (n_splits + 1))
-        min_gap = n_samples - est_test_size * n_splits - 1
-        warnings.warn(
-            f"n_splits adjusted to {n_splits} due to small sample size (n_samples={n_samples})"
-        )
-
-    if gap > min_gap:
-        old_gap = gap
-        gap = max(0, min_gap)
-        warnings.warn(
-            f"gap adjusted from {old_gap} to {gap} due to small sample size (n_samples={n_samples})"
+    if min_gap < 0 or gap > min_gap:
+        # Data too short for requested CV parameters - HARD FAIL
+        return PredictionResult(
+            source_pair=pair_name,
+            target_pair=pair_name,
+            mode=mode,
+            feature_importance={},
+            mean_dynamic_auc=0.5,
+            mean_baseline_auc=0.5,
+            mean_delta_auc=0.0,
+            folds=[],
+            warning="data_too_short_for_cv",
+            n_features_used=0,
+            diagnostics={
+                "error": "insufficient_data_for_cv",
+                "n_samples": n_samples,
+                "n_splits_requested": n_splits,
+                "gap_requested": gap,
+                "min_samples_needed": (n_splits + 1) * (1 + gap) + n_splits,
+            },
         )
 
     tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap)
@@ -467,7 +452,12 @@ def rolling_origin_cv(
         y_train = y[train_idx]
         y_test = y[test_idx]
 
+        # Hard check: skip fold if test set has only one class
         if len(np.unique(y_test)) < 2:
+            continue
+
+        # Hard check: skip fold if train set has only one class
+        if len(np.unique(y_train)) < 2:
             continue
 
         try:
@@ -482,11 +472,15 @@ def rolling_origin_cv(
             dynamic_auc = roc_auc_score(y_test, y_prob)
             feature_coefs_sum += clf.coef_[0]
             valid_folds += 1
-        except Exception:
-            dynamic_auc = 0.5
+        except Exception as e:
+            # Skip this fold - do NOT pretend AUC=0.5
+            print(f"DEBUG: Fold {fold_id} failed: {e}")
+            continue
 
-        baseline_prob = np.full_like(y_test, y_train.mean())
+        # Baseline: predict constant = training set positive rate
+        # This is a NAIVE baseline (not using any features)
         try:
+            baseline_prob = np.full_like(y_test, y_train.mean())
             baseline_auc = roc_auc_score(y_test, baseline_prob)
         except Exception:
             baseline_auc = 0.5

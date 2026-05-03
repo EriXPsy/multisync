@@ -46,6 +46,8 @@ class CCAResult:
     p_value_corrected: float = 1.0  # BH FDR corrected p-value
     surrogate_n: int = 0
     null_peak_ccf: Optional[np.ndarray] = None  # surrogates' peak CCFs
+    # Diagnostics (runtime warnings)
+    diagnostics: List[Dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         # Convert arrays to lists for JSON serialization
@@ -67,6 +69,7 @@ class CCAResult:
             "p_value_corrected": float(self.p_value_corrected),
             "surrogate_n": self.surrogate_n,
             "null_peak_ccf": null_peaks,
+            "diagnostics": self.diagnostics,
         }
 
     @classmethod
@@ -90,6 +93,7 @@ class CCAResult:
             p_value_corrected=float(d.get("p_value_corrected", d.get("p_value", 1.0))),
             surrogate_n=int(d.get("surrogate_n", 0)),
             null_peak_ccf=null_peaks,
+            diagnostics=d.get("diagnostics", []),
         )
 
     @classmethod
@@ -437,6 +441,27 @@ def cascade_analysis(
                     x_clean = np.where(np.isnan(x_trim), x_mean if not np.isnan(x_mean) else 0.0, x_trim)
                     y_clean = np.where(np.isnan(y_trim), y_mean if not np.isnan(y_mean) else 0.0, y_trim)
 
+                    # --- Nonlinear drift detection (heuristic) ---
+                    # If residual variance after linear detrending is >80% of
+                    # original variance, nonlinear drift is likely present.
+                    # This can create U-shaped pseudo-oscillations in CCF.
+                    diagnostics = []  # local diagnostics for this pair
+                    for sig, label in [(x_clean, f"{name_a}/{col_a}"), (y_clean, f"{name_b}/{col_b}")]:
+                        sig_valid = sig[~np.isnan(sig)]
+                        if len(sig_valid) < 10:
+                            continue
+                        var_orig = np.var(sig_valid)
+                        var_res = np.var(sp_detrend(sig_valid))
+                        if var_orig > 0 and var_res > 0.8 * var_orig:
+                            diagnostics.append({
+                                "type": "warning",
+                                "message": (
+                                    f"High nonlinear drift detected in {label}. "
+                                    f"Linear detrending may be insufficient. "
+                                    f"CCF results may contain U-shaped pseudo-oscillations."
+                                )
+                            })
+
                     # Cap max_lag_sec to the mathematically feasible range for
                     # this particular segment.  CCF needs n >= 2*max_lag + 1,
                     # so max_lag <= (n-1)//2.  Silently cap instead of crashing.
@@ -539,6 +564,7 @@ def cascade_analysis(
                         p_value=p_val,
                         surrogate_n=surrogate_n,
                         null_peak_ccf=null_peaks,
+                        diagnostics=diagnostics,
                     )
                     cca_results.append(result)
 

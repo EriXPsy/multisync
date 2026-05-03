@@ -441,24 +441,32 @@ def cascade_analysis(
                     x_clean = np.where(np.isnan(x_trim), x_mean if not np.isnan(x_mean) else 0.0, x_trim)
                     y_clean = np.where(np.isnan(y_trim), y_mean if not np.isnan(y_mean) else 0.0, y_trim)
 
-                    # --- Nonlinear drift detection (heuristic) ---
-                    # If residual variance after linear detrending is >80% of
-                    # original variance, nonlinear drift is likely present.
-                    # This can create U-shaped pseudo-oscillations in CCF.
+                    # --- Nonlinear drift detection (strict heuristic) ---
+                    # Only trigger when linear detrending FAILED to remove
+                    # the dominant trend: if residual variance >95% of original,
+                    # the drift is essentially nonlinear and CCF may contain
+                    # U-shaped pseudo-oscillations.
+                    # Threshold is strict (95%) to avoid Alert Fatigue:
+                    # most EDA/fNIRS signals have mild nonlinear components
+                    # that do NOT invalidate CCF results.
                     diagnostics = []  # local diagnostics for this pair
                     for sig, label in [(x_clean, f"{name_a}/{col_a}"), (y_clean, f"{name_b}/{col_b}")]:
                         sig_valid = sig[~np.isnan(sig)]
-                        if len(sig_valid) < 10:
+                        if len(sig_valid) < 30:
                             continue
                         var_orig = np.var(sig_valid)
                         var_res = np.var(sp_detrend(sig_valid))
-                        if var_orig > 0 and var_res > 0.8 * var_orig:
+                        # Trigger only if residual variance > 95% of original
+                        # (linear detrending removed <5% of variance)
+                        if var_orig > 0 and var_res > 0.95 * var_orig:
                             diagnostics.append({
                                 "type": "warning",
                                 "message": (
-                                    f"High nonlinear drift detected in {label}. "
-                                    f"Linear detrending may be insufficient. "
-                                    f"CCF results may contain U-shaped pseudo-oscillations."
+                                    f"Severe nonlinear drift detected in {label}. "
+                                    f"Linear detrending removed <5% of signal variance. "
+                                    f"CCF results may contain spurious oscillations. "
+                                    f"Recommendation: apply high-pass filter (e.g., 0.01Hz) "
+                                    f"in preprocessing (MNE/NeuroKit) before importing."
                                 )
                             })
 

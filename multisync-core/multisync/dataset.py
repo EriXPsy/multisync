@@ -19,6 +19,53 @@ from scipy import interpolate as sp_interp
 
 
 # ---------------------------------------------------------------------------
+# Time type detection helper
+# ---------------------------------------------------------------------------
+
+def _detect_time_type(time_series: pd.Series) -> str:
+    """
+    Detect if a time column is ABSOLUTE or RELATIVE.
+
+    Detection logic:
+    - ABSOLUTE: values look like Unix timestamps (> 1e9, i.e., > 2001-09-09)
+      or ISO-like strings containing 'T' or ':'.
+    - RELATIVE: values are small floats starting near 0 (typical CSV export
+      with "Time" column starting at 0.00).
+
+    Returns
+    -------
+    str : "absolute" | "relative" | "unknown"
+    """
+    if pd.api.types.is_string_dtype(time_series):
+        # Check for ISO-like strings
+        sample = time_series.dropna().iloc[0] if len(time_series.dropna()) > 0 else ""
+        if isinstance(sample, str) and ("T" in sample or ":" in sample):
+            return "absolute"
+        return "unknown"
+
+    vals = time_series.dropna().values
+    if len(vals) == 0:
+        return "unknown"
+
+    min_val = float(np.min(vals))
+    max_val = float(np.max(vals))
+
+    # Unix timestamp heuristic: values > 1e9 (year 2001+) are likely absolute
+    if min_val > 1e9:
+        return "absolute"
+
+    # Values > 1e6 might be millisecond timestamps
+    if min_val > 1e6:
+        return "absolute"
+
+    # Small values starting near 0 → relative
+    if min_val >= 0 and max_val < 10000:
+        return "relative"
+
+    return "unknown"
+
+
+# ---------------------------------------------------------------------------
 # Context annotation
 # ---------------------------------------------------------------------------
 
@@ -139,11 +186,28 @@ class SynchronyDataset:
         self,
         target_hz: float = 1.0,
         method: str = "linear",
+        require_co_start: bool = False,
     ) -> "SynchronyDataset":
         """
     Resample every modality to *target_hz* using linear (default) or
     nearest-neighbour interpolation.  The common time axis spans the
     intersection of all modalities' ranges.
+
+    CRITICAL — Time Synchronization Warning
+    ---------------------------------------
+    If your data files use **relative timestamps** (e.g., Time = 0.00, 0.05,
+    ...) and the recording devices started at **different absolute times**, the
+    alignment will be WRONG.  Device A starting at 10:01:03 and Device B at
+    10:01:07 with both files starting at Time=0 will produce an **artificial
+    4-second lag** in CCF — a hardware-asynchrony artefact, not synchrony.
+
+    What to do:
+    - Use **absolute timestamps** (Unix timestamp or ISO 8601) in your CSV
+      files so MultiSync can detect the real time offset.
+    - If only relative timestamps are available, ensure all devices were
+      **co-started** (started recording at the same moment).
+    - Set ``require_co_start=True`` to raise an error instead of silently
+      proceeding with potentially misaligned data.
 
     Warning
     -------
@@ -175,9 +239,56 @@ class SynchronyDataset:
         (e.g., 1-10 Hz), NOT the raw sensor sampling rate.
     method : str
         'linear' | 'nearest' | 'cubic'.  Passed to scipy.interpolate.
+    require_co_start : bool
+        If True, raise ValueError when all modalities use relative
+        timestamps (time starting near 0).  This prevents the silent
+        hardware-asynchrony artefact where CCF shows a false lag equal
+        to the device start-time difference.
     """
         if not self.modalities:
             raise ValueError("No modalities to align.")
+
+        # --- Time synchronization check ---
+        # Detect if modalities use absolute or relative timestamps.
+        # If ALL are relative, warn the user about potential clock offset.
+        time_types = {}
+        for name, df in self.modalities.items():
+            time_types[name] = _detect_time_type(df["time"])
+
+        all_relative = all(tt == "relative" for tt in time_types.values())
+        any_absolute = any(tt == "absolute" for tt in time_types.values())
+        mixed = any_absolute and not all_relative
+
+        if mixed:
+            # Some files have absolute timestamps, some don't — very dangerous
+            abs_names = [n for n, t in time_types.items() if t == "absolute"]
+            rel_names = [n for n, t in time_types.items() if t == "relative"]
+            raise ValueError(
+                f"Timestamp type mismatch! Modalities {abs_names} use absolute "
+                f"timestamps while {rel_names} use relative timestamps. "
+                f"Either convert all to absolute or ensure co-starting."
+            )
+
+        if all_relative and require_co_start:
+            raise ValueError(
+                "All modalities use RELATIVE timestamps (starting near 0). "
+                "Cross-device synchrony analysis requires PRECISE time "
+                "synchronization. Please either: (1) use absolute timestamps "
+                "(Unix timestamp or ISO 8601), or (2) confirm all devices "
+                "were started at the exact same moment (co-started). "
+                "If co-started, set require_co_start=False to proceed."
+            )
+
+        if all_relative and not require_co_start:
+            warnings.warn(
+                "All modalities use relative timestamps (starting near 0). "
+                "If recording devices started at DIFFERENT times, CCF will "
+                "show a FALSE LAG equal to the start-time difference. "
+                "Please confirm all devices were co-started, or use absolute "
+                "timestamps (Unix/ISO). Set require_co_start=True to block "
+                "this check.",
+                UserWarning,
+            )
 
         self.target_hz = target_hz
         feat_cols = self.feature_columns

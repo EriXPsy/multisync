@@ -566,3 +566,130 @@ def extract_features_segmented(
         results[label] = seg_results
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Multi-peak profile extraction (for long-term baseline analysis)
+# ---------------------------------------------------------------------------
+
+def extract_peak_profiles(
+    wcc: np.ndarray,
+    hz: float = 1.0,
+    height: float = 0.2,
+    distance: Optional[int] = None,
+    prominence: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Extract multi-peak profiles from a WCC (synchrony) time series.
+
+    Unlike :func:`extract_dynamic_features` (which assumes a single dominant
+    sync event per segment), this function detects **all** synchrony peaks
+    using `scipy.signal.find_peaks`.  Use this for long-term baseline
+    analysis (e.g., 5-min conversation) where the "single-peak fallacy"
+    would mischaracterize the data.
+
+    Parameters
+    ----------
+    wcc : 1-D array
+        WCC synchrony time series.
+    hz : float
+        Sampling rate (for converting samples → seconds).
+    height : float
+        Minimum WCC value to be considered a peak (default 0.2).
+    distance : int or None
+        Minimum distance (samples) between peaks.  Default: ``max(10, hz)``.
+    prominence : float or None
+        Minimum prominence of peaks.  Default: ``height / 2``.
+
+    Returns
+    -------
+    profiles : list of dict
+        Each dict contains per-peak features:
+        - ``peak_index``: sample index in ``wcc``
+        - ``peak_time_sec``: time in seconds
+        - ``peak_value``: WCC value at peak
+        - ``prominence``: peak prominence
+        - ``width_samples``: peak width (samples, at half prominence)
+        - ``inter_peak_interval_sec``: time to next peak (NaN for last)
+        - ``build_up_rate``: slope from previous trough to this peak
+        - ``breakdown_rate``: slope from this peak to next trough
+
+    Notes
+    -----
+    This function addresses the **single-peak fallacy** in long recordings.
+    For short windows (10-30 s) used in prediction, use
+    :func:`extract_dynamic_features` (single-peak, fixed 10 features).
+
+    The output is variable-length (ragged) — caller must aggregate
+    (e.g., mean/max/percentile of peak lags) for fixed-dim downstream use.
+    """
+    if distance is None:
+        distance = max(10, int(hz))
+    if prominence is None:
+        prominence = height / 2.0
+
+    # Handle NaN: replace with local mean for peak detection
+    wcc_clean = wcc.copy()
+    nan_mask = np.isnan(wcc_clean)
+    if nan_mask.any():
+        valid_mean = np.nanmean(wcc_clean)
+        wcc_clean[nan_mask] = valid_mean if not np.isnan(valid_mean) else 0.0
+
+    # Detect peaks
+    peaks, properties = sp_signal.find_peaks(
+        wcc_clean,
+        height=height,
+        distance=distance,
+        prominence=prominence,
+    )
+
+    if len(peaks) == 0:
+        return []
+
+    profiles = []
+    n = len(wcc)
+
+    for i, idx in enumerate(peaks):
+        # Basic peak info
+        prof = {
+            "peak_index": int(idx),
+            "peak_time_sec": float(idx / hz),
+            "peak_value": float(wcc_clean[idx]),
+            "prominence": float(properties["prominences"][i]),
+            "width_samples": float(properties["widths"][i]) if "widths" in properties else np.nan,
+        }
+
+        # Inter-peak interval
+        if i < len(peaks) - 1:
+            interval = (peaks[i + 1] - idx) / hz
+        else:
+            interval = np.nan
+        prof["inter_peak_interval_sec"] = float(interval)
+
+        # Build-up rate: slope from previous trough to this peak
+        if i > 0:
+            prev_idx = peaks[i - 1]
+            # Find trough between prev_peak and this peak
+            segment = wcc_clean[prev_idx:idx + 1]
+            trough_idx = prev_idx + np.argmin(segment)
+            build_up = (wcc_clean[idx] - wcc_clean[trough_idx]) / ((idx - trough_idx) / hz)
+        else:
+            # First peak: use first valid WCC as proxy for "pre-sync baseline"
+            build_up = (wcc_clean[idx] - np.nanmean(wcc_clean[:max(1, idx)])) / (idx / hz) if idx > 0 else 0.0
+        prof["build_up_rate"] = float(build_up)
+
+        # Breakdown rate: slope from this peak to next trough (or end)
+        if i < len(peaks) - 1:
+            next_idx = peaks[i + 1]
+            segment = wcc_clean[idx:next_idx + 1]
+            trough_idx = idx + np.argmin(segment)
+            breakdown = (wcc_clean[idx] - wcc_clean[trough_idx]) / ((trough_idx - idx) / hz)
+        else:
+            # Last peak: use post-peak mean as proxy
+            post_mean = np.nanmean(wcc_clean[idx:]) if idx < n - 1 else wcc_clean[idx]
+            breakdown = (wcc_clean[idx] - post_mean) / ((n - 1 - idx) / hz) if idx < n - 1 else 0.0
+        prof["breakdown_rate"] = float(breakdown)
+
+        profiles.append(prof)
+
+    return profiles

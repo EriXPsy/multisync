@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy.fft import fft, ifft
-from scipy.signal import correlate as sp_correlate
+from scipy.signal import correlate as sp_correlate, detrend as sp_detrend
 
 import logging
 
@@ -43,6 +43,7 @@ class CCAResult:
     # Significance
     is_significant: bool = False
     p_value: float = 1.0
+    p_value_corrected: float = 1.0  # BH FDR corrected p-value
     surrogate_n: int = 0
     null_peak_ccf: Optional[np.ndarray] = None  # surrogates' peak CCFs
 
@@ -63,6 +64,7 @@ class CCAResult:
             "direction": self.direction,
             "is_significant": self.is_significant,
             "p_value": float(self.p_value),
+            "p_value_corrected": float(self.p_value_corrected),
             "surrogate_n": self.surrogate_n,
             "null_peak_ccf": null_peaks,
         }
@@ -85,6 +87,7 @@ class CCAResult:
             direction=d.get("direction", ""),
             is_significant=bool(d.get("is_significant", False)),
             p_value=float(d.get("p_value", 1.0)),
+            p_value_corrected=float(d.get("p_value_corrected", d.get("p_value", 1.0))),
             surrogate_n=int(d.get("surrogate_n", 0)),
             null_peak_ccf=null_peaks,
         )
@@ -273,9 +276,18 @@ def compute_ccf(
             f"Need at least {2 * max_lag_samples + 1}."
         )
 
-    # Normalize: remove means
-    x_demean = x - x.mean()
-    y_demean = y - y.mean()
+    # Detrend: remove linear trend (slow drift) then demean.
+    # Using scipy.signal.detrend instead of simple x - x.mean() because
+    # biological signals (e.g, EDA) often have global slow drift (gradual
+    # sweating across a 5-min session).  Shared linear trends dominate CCF
+    # and push peak_idx to max lag boundaries, creating false causality.
+    # detrend(type="linear") fits and subtracts the least-squares line,
+    # removing slow drift while preserving local fluctuations.
+    x_detrended = sp_detrend(x)
+    y_detrended = sp_detrend(y)
+    # After detrend, mean is ~0, but re-demean for numerical safety
+    x_demean = x_detrended - x_detrended.mean()
+    y_demean = y_detrended - y_detrended.mean()
 
     # Apply Hanning window for edge-effect mitigation
     if apply_window:
@@ -325,7 +337,7 @@ def cascade_analysis(
     alpha: float = 0.05,
     seed: int = 42,
     apply_window: bool = True,
-) -> Tuple[List[CCAResult], List[CascadeEdge]]:
+) -> Tuple[List[CCAResult], List[CascadeEdge], Dict[str, Dict[str, Any]]]:
     """
     Compute pairwise CCF across all modalities with PRTF surrogate testing.
 
@@ -348,9 +360,12 @@ def cascade_analysis(
     Returns
     -------
     cca_results : list of CCAResult
-        Detailed results per modality pair.
+        Detailed results per modality pair (with BH-corrected p-values).
     edges : list of CascadeEdge
-        Viewer-ready directed cascade edges (only significant ones).
+        Viewer-ready directed cascade edges (only significant ones after FDR).
+    metrics : dict
+        Lightweight graph metrics (in_degree, out_degree, driver_score,
+        is_hub, is_follower) per modality.  Computed without networkx.
     """
     if not dataset._aligned:
         raise ValueError("Dataset must be aligned before cascade analysis.")
@@ -362,6 +377,7 @@ def cascade_analysis(
 
     cca_results: List[CCAResult] = []
     edges: List[CascadeEdge] = []
+    raw_pvals: List[float] = []  # collect raw p-values for BH correction
 
     for i, name_a in enumerate(modality_names):
         for name_b in modality_names[i + 1:]:
@@ -493,6 +509,7 @@ def cascade_analysis(
                         / (surrogate_n_actual + 1.0)
                     )
                     is_sig = p_val < alpha
+                    raw_pvals.append(p_val)
 
                     result = CCAResult(
                         modality_a=name_a,
@@ -522,7 +539,159 @@ def cascade_analysis(
                             polarity="positive" if peak_val >= 0 else "negative",
                         ))
 
-    return cca_results, edges
+        # --- Post-hoc: Benjamini-Hochberg FDR correction ---
+        # Raw p-values from pairwise surrogate tests are subject to the
+        # multiple-comparisons problem.  With m modality pairs, the family-wise
+        # error rate at alpha=0.05 approaches 1 - (0.95)^m (e.g, 40% for
+        # m=10, ~90% for m=45).  Apply BH correction to control FDR.
+        if len(raw_pvals) > 0:
+            corrected = _bh_fdr_correct(raw_pvals, q=alpha)
+            # Update cca_results with corrected p-values
+            # Also rebuild edges based on corrected significance
+            edges = []
+            for idx, result in enumerate(cca_results):
+                result.p_value_corrected = corrected[idx]
+                result.is_significant = corrected[idx] < alpha
+                # Update p_value to corrected (for downstream consumption)
+                result.p_value = corrected[idx]
+
+                # Rebuild edges with corrected significance
+                if result.is_significant and result.direction != "synchronous":
+                    # Determine source/target from direction string
+                    if "→" in result.direction:
+                        src, tgt = result.direction.split("→")
+                    else:
+                        src = result.modality_a
+                        tgt = result.modality_b
+                    edges.append(CascadeEdge(
+                        source=src,
+                        target=tgt,
+                        lag_sec=result.peak_lag_sec,
+                        ccf_value=result.peak_ccf,
+                        p_value=result.p_value_corrected,
+                        is_significant=result.is_significant,
+                        polarity="positive" if result.peak_ccf >= 0 else "negative",
+                    ))
+
+        # --- Compute lightweight graph metrics (no networkx) ---
+        metrics = compute_cascade_metrics(edges, alpha)
+
+        return cca_results, edges, metrics
+
+    # --- Compute lightweight graph metrics (no networkx) ---
+        metrics = compute_cascade_metrics(edges, alpha)
+
+        return cca_results, edges, metrics
+
+
+# ---------------------------------------------------------------------------
+# Multiple Comparisons Correction — Benjamini-Hochberg FDR
+# ---------------------------------------------------------------------------
+
+def _bh_fdr_correct(p_values: List[float], q: float = 0.05) -> List[float]:
+    """
+    Apply Benjamini-Hochberg FDR correction to a list of p-values.
+
+    Returns adjusted p-values (q-values).  A test is significant if
+    adjusted_p <= q.
+
+    Parameters
+    ----------
+    p_values : list of float
+        Raw p-values (uncorrected).
+    q : float
+        Target FDR level (default 0.05).
+
+    Returns
+    -------
+    adjusted : list of float
+        Adjusted p-values, same order as input.
+        adjusted[i] <= q  →  reject H_0 (significant).
+    """
+    m = len(p_values)
+    if m == 0:
+        return []
+
+    # Sort p-values with original indices
+    indexed = [(i, p) for i, p in enumerate(p_values)]
+    indexed_sorted = sorted(indexed, key=lambda x: x[1])
+
+    # Compute adjusted p-values (BH step-up)
+    # adjusted_p_(j) = min_{k >= j} (m * p_(k) / k)
+    # Then enforce monotonicity: adj_p_(j) <= adj_p_(j+1)
+    raw_adj = [0.0] * m
+    for j in range(1, m + 1):
+        p_j = indexed_sorted[j - 1][1]
+        raw_adj[j - 1] = min(1.0, p_j * m / j)
+
+    # Enforce non-decreasing order (adjusted p-values can only increase)
+    for j in range(m - 2, -1, -1):
+        raw_adj[j] = min(raw_adj[j], raw_adj[j + 1])
+
+    # Map back to original order
+    adjusted = [0.0] * m
+    for j in range(m):
+        orig_idx = indexed_sorted[j][0]
+        adjusted[orig_idx] = raw_adj[j]
+
+    return adjusted
+
+
+# ---------------------------------------------------------------------------
+# Lightweight Graph Metrics (no networkx dependency)
+# ---------------------------------------------------------------------------
+
+def compute_cascade_metrics(
+    edges: List[CascadeEdge],
+    alpha: float = 0.05,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Compute lightweight graph metrics from cascade edges.
+
+    Uses only collections.Counter — no networkx needed.
+    Computes:
+    - in_degree: how many edges point TO this modality (driven by others)
+    - out_degree: how many edges originate FROM this modality (drives others)
+    - driver_score: out_degree - in_degree (positive = driver, negative = follower)
+
+    Parameters
+    ----------
+    edges : list of CascadeEdge
+        Directed edges (only significant ones).
+    alpha : float
+        Significance threshold (for labeling; already filtered by caller).
+
+    Returns
+    -------
+    metrics : dict
+        {modality_name: {"in_degree": int, "out_degree": int,
+                         "driver_score": int, "is_hub": bool}}
+        is_hub is True if out_degree >= 2 (drives 2+ others).
+    """
+    from collections import Counter
+
+    out_degrees = Counter(e.source for e in edges if e.is_significant)
+    in_degrees = Counter(e.target for e in edges if e.is_significant)
+
+    all_modalities = set(out_degrees.keys()) | set(in_degrees.keys())
+    metrics: Dict[str, Dict[str, Any]] = {}
+
+    for mod in all_modalities:
+        out_d = out_degrees.get(mod, 0)
+        in_d = in_degrees.get(mod, 0)
+        driver = out_d - in_d
+        metrics[mod] = {
+            "in_degree": in_d,
+            "out_degree": out_d,
+            "driver_score": driver,
+            "is_hub": out_d >= 2,       # drives 2+ others → hub/driver
+            "is_follower": in_d >= 2,   # driven by 2+ others → follower
+        }
+
+    return metrics
+
+
+
 
 
 # Re-export for convenience

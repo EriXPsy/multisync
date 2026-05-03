@@ -203,7 +203,7 @@ class TestCascade:
         from multisync.cascade import cascade_analysis
         ds = _make_aligned_dyad()
         # Use very few surrogates for speed
-        results, edges = cascade_analysis(
+        results, edges, metrics = cascade_analysis(
             ds, max_lag_sec=10, surrogate_n=50, seed=42
         )
         # With unrelated signals, most edges should not be significant
@@ -452,7 +452,7 @@ class TestGroundTruth:
         ds.zscore()
 
         # Use enough surrogates for reliable significance testing
-        results, edges = cascade_analysis(
+        results, edges, metrics = cascade_analysis(
             ds, max_lag_sec=25.0, surrogate_n=200, seed=42, alpha=0.05
         )
 

@@ -141,17 +141,41 @@ class SynchronyDataset:
         method: str = "linear",
     ) -> "SynchronyDataset":
         """
-        Resample every modality to *target_hz* using linear (default) or
-        nearest-neighbour interpolation.  The common time axis spans the
-        intersection of all modalities' ranges.
+    Resample every modality to *target_hz* using linear (default) or
+    nearest-neighbour interpolation.  The common time axis spans the
+    intersection of all modalities' ranges.
 
-        Parameters
-        ----------
-        target_hz : float
-            Target sampling rate in Hz.  Default 1.0 (1 sample/second).
-        method : str
-            'linear' | 'nearest' | 'cubic'.  Passed to scipy.interpolate.
-        """
+    Warning
+    -------
+    Heterogeneous sampling-rate "forced alignment" hazard:
+
+    This library assumes all input modalities are already at a **macroscopic
+    common scale** (~1-10 Hz).  Do NOT feed raw heterogeneous signals
+    (e.g., EEG at 250 Hz + EDA at 4 Hz) directly into :meth:`align`.
+
+    - If ``target_hz`` is set too high (e.g., 250 Hz for EEG),
+      low-frequency signals (EDA) will be **redundantly interpolated**,
+      wasting memory and computation.
+    - If ``target_hz`` is set too low (e.g., 4 Hz), high-frequency
+      signals (EEG) will be **violently downsampled**, losing all
+      features above ``target_hz / 2`` (Nyquist).
+
+    Correct workflow for heterogeneous data:
+
+    1. Compute **second-level feature envelopes** from high-frequency signals
+       (e.g., EEG band power, EMG envelope) *before* calling this library.
+    2. Align all modalities to a common low frequency (1-10 Hz).
+    3. Then call :meth:`align`.
+
+    Parameters
+    ----------
+    target_hz : float
+        Target sampling rate in Hz.  Default 1.0 (1 sample/second).
+        For heterogeneous data, this should be the MACROSCOPIC common rate
+        (e.g., 1-10 Hz), NOT the raw sensor sampling rate.
+    method : str
+        'linear' | 'nearest' | 'cubic'.  Passed to scipy.interpolate.
+    """
         if not self.modalities:
             raise ValueError("No modalities to align.")
 

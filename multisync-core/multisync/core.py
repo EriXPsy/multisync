@@ -98,6 +98,8 @@ class AnalysisResults:
     prediction: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     # Cross-modal prediction (source_pair → target_pair)
     cross_modal_prediction: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # Cascade graph metrics (in_degree, out_degree, driver_score, etc.)
+    cascade_metrics: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     # Context / Score view
     score_view: List[Dict[str, Any]] = field(default_factory=list)
     # Diagnostics — structured log of skipped/failed computations.
@@ -115,6 +117,7 @@ class AnalysisResults:
             "dynamic_features": self.dynamic_features,
             "dynamic_features_segmented": self.dynamic_features_segmented,
             "cascade_graph": self.cascade_graph,
+            "cascade_metrics": self.cascade_metrics,
             "prediction": self.prediction,
             "cross_modal_prediction": self.cross_modal_prediction,
             "score_view": self.score_view,
@@ -163,6 +166,9 @@ class AnalysisResults:
             else:
                 cross_pred[k] = PredictionResult.from_dict(v)
 
+        # Restore cascade_metrics
+        cas_metrics = d.get("cascade_metrics", {})
+
         # Restore cca_results: List[Dict] -> List[CCAResult]
         cca = []
         for r in d.get("cca_results", []):
@@ -186,6 +192,7 @@ class AnalysisResults:
             cca_results=cca,
             cascade_edges=edges,
             cascade_graph=d.get("cascade_graph", {}),
+            cascade_metrics=cas_metrics,
             prediction=pred,
             cross_modal_prediction=cross_pred,
             score_view=d.get("score_view", []),
@@ -377,7 +384,7 @@ class DynamicAnalyzer:
             }
 
         # 3. Cascade analysis (CCF + PRTF surrogates)
-        cca_results, cascade_edges = cascade_analysis(
+        cca_results, cascade_edges, cascade_metrics = cascade_analysis(
             dataset,
             max_lag_sec=self.max_lag_sec,
             surrogate_n=self.surrogate_n,
@@ -419,6 +426,7 @@ class DynamicAnalyzer:
             for e in cascade_edges
         ]
         results.cascade_graph = {"nodes": nodes, "edges": edges_data}
+        results.cascade_metrics = cascade_metrics
 
         # 4. Prediction window analysis (dynamic features, not raw WCC)
         # Use a larger window for feature extraction (need enough data

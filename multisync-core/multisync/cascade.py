@@ -264,6 +264,20 @@ def compute_ccf(
         Lag values in seconds.
     ccf : 1-D array
         Normalized CCF values (Pearson-like, range ≈ [-1, 1]).
+
+    Notes
+    -----
+    **Nonlinear drift caveat**: This function uses `scipy.signal.detrend(type="linear")`
+    to remove linear slow drift. However, if the signal contains **nonlinear drift**
+    (e.g., exponential, polynomial, or U-shaped slow components), linear detrending
+    will **fail to remove it completely**, potentially creating **U-shaped pseudo-oscillations**
+    in the CCF. For signals with visible nonlinear baseline wander, consider:
+    
+    - Using `scipy.signal.detrend(type="constant")` (demean only) + manual nonlinear removal
+    - Applying a high-pass filter before CCF
+    - Visual inspection of detrended signals
+    
+    See: Issue #3 "线性去趋势导致的U型伪振荡骗局" in project notes.
     """
     n = len(x)
     assert len(y) == n, f"x and y must have same length: {n} vs {len(y)}"
@@ -607,6 +621,22 @@ def _bh_fdr_correct(p_values: List[float], q: float = 0.05) -> List[float]:
     adjusted : list of float
         Adjusted p-values, same order as input.
         adjusted[i] <= q  →  reject H_0 (significant).
+
+    Notes
+    -----
+    **PRDS assumption**: BH procedure assumes **Positive Regression Dependency
+    on a Subset (PRDS)** for strict FDR control. If p-values are strongly
+    **negatively correlated** (e.g., one significant result makes others less
+    likely to be significant), the actual FDR may **exceed q**.
+
+    In MultiSync, CCF p-values from **overlapping time windows** may violate
+    PRDS. Consider:
+    
+    - Using **independent tests only** (e.g., separate dyads, separate epochs)
+    - Applying **permutation-based FDR** (more robust to dependence)
+    - Reporting **raw p-values + correction method** for transparency
+
+    See: Issue #4 "FDR的关联依赖性（PRDS假设）隐患" in project notes.
     """
     m = len(p_values)
     if m == 0:

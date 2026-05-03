@@ -106,14 +106,39 @@ def _sliding_window_wcc_cumsum(
     Cumsum-based sliding-window Pearson correlation.
     Assumes no NaN values in x or y.
     Memory: O(n) instead of O(n*w).
+
+    Note
+    ----
+    Input signals are **pre-demeaned** before cumsum to avoid
+    catastrophic cancellation.
+
+    When ``cumsum(x²)`` becomes very large (long signals, e.g. 1 hr at
+    100 Hz → ``cumsum`` ≈ 10⁹–10¹²), computing
+    ``var = E[X²] - E[X]²`` suffers from catastrophic cancellation —
+    the floating-point mantissa (≈15–17 digits) is exhausted by the
+    huge DC component, and subtracting two large similar-magnitude
+    numbers to get a small variance produces pure rounding noise.
+
+    By removing the global mean **before** cumsum, we keep all
+    intermediate sums close to zero.  Pearson correlation is
+    translation-invariant, so this does not change the final result.
     """
     n = len(x)
+
+    # CRITICAL: Pre-demean to avoid catastrophic cancellation.
+    # `x_demeaned = x - mean(x)` keeps cumsum_x and cumsum_x2 small,
+    # preventing loss of precision in `var = E[X²] - E[X]²`.
+    x_mean = np.mean(x)
+    y_mean = np.mean(y)
+    x_demeaned = x - x_mean
+    y_demeaned = y - y_mean
+
     # Pad cumsum with leading 0 for easier window sum computation
-    cumsum_x = np.cumsum(x)
-    cumsum_y = np.cumsum(y)
-    cumsum_xy = np.cumsum(x * y)
-    cumsum_x2 = np.cumsum(x ** 2)
-    cumsum_y2 = np.cumsum(y ** 2)
+    cumsum_x = np.cumsum(x_demeaned)
+    cumsum_y = np.cumsum(y_demeaned)
+    cumsum_xy = np.cumsum(x_demeaned * y_demeaned)
+    cumsum_x2 = np.cumsum(x_demeaned ** 2)
+    cumsum_y2 = np.cumsum(y_demeaned ** 2)
 
     # Pad with 0 at the beginning
     cumsum_x = np.concatenate([[0.0], cumsum_x])
@@ -259,139 +284,170 @@ class DynamicFeatures:
 # Feature extraction
 # ---------------------------------------------------------------------------
 
-def extract_dynamic_features(
+def _aggregate_profiles(
+    profiles: List[Dict[str, Any]],
     wcc: np.ndarray,
-    hz: float = 1.0,
-    onset_threshold: float = 0.2,
-    max_nan_ratio: float = 0.2,
+    hz: float,
+    onset_threshold: float,
+    aggregation: str,
 ) -> DynamicFeatures:
     """
-    Extract 10 dynamic features from a WCC time series.
+    Aggregate multi-peak profiles into a single DynamicFeatures (fixed 10-dim vector).
+
+    This is the core of the unified API: no matter how many peaks are detected,
+    the output is always a fixed-length feature vector — satisfying the shape
+    guarantee required by downstream ML models.
+
+    Aggregation rules
+    -----------------
+    - ``aggregation="mean"`` : average all per-peak metrics
+    - ``aggregation="max"``  : take the values from the peak with highest ``peak_value``
+    - ``aggregation="median"``: median of all per-peak metrics
+
+    Feature mapping (per-peak → DynamicFeatures)
+    --------------------------------------------
+    Each peak produces: peak_time_sec, peak_value, prominence,
+    width_samples, inter_peak_interval_sec, build_up_rate, breakdown_rate.
+
+    We map these to the 10 Gordon-inspired features:
+
+    - onset_latency      : time of FIRST threshold crossing (before any peak)
+    - onset_amplitude    : WCC value at that first threshold crossing
+    - build_up_rate      : aggregated across all peaks
+    - build_up_slope     : slope from onset to first peak
+    - peak_amplitude     : max peak_value across all peaks (or aggregated)
+    - peak_duration      : aggregated width/hz across all peaks
+    - breakdown_rate     : aggregated across all peaks
+    - recovery_time      : inter_peak_interval of last peak (or total span for multi-peak)
+    - mean_synchrony    : mean of entire WCC series (global, same for all peaks)
+    - synchrony_entropy  : entropy of entire WCC series (global)
 
     Parameters
     ----------
+    profiles : list of dict
+        Output of ``extract_peak_profiles`` (or internal equivalent).
     wcc : 1-D array
-        Windowed cross-correlation time series.
+        Original WCC series (for global features).
     hz : float
-        Sampling rate of WCC (Hz).
+        Sampling rate.
     onset_threshold : float
-        Minimum WCC value to count as "significant synchrony onset".
-    max_nan_ratio : float
-        Maximum fraction of NaN values permitted.  If the NaN ratio exceeds
-        this threshold, all features are returned as NaN.  Default 0.2 (20%).
-        This prevents spurious dynamic features being extracted from segments
-        where structural missingness (e.g., face tracking dropout) dominates.
+        Threshold for onset detection (used for onset_amplitude).
+    aggregation : str
+        "mean", "max", or "median".
 
     Returns
     -------
-    DynamicFeatures with all 10 features.
+    DynamicFeatures with aggregated values.
     """
-    _nan_features = DynamicFeatures(
-        onset_latency=np.nan, onset_amplitude=np.nan,
-        build_up_rate=np.nan, build_up_slope=np.nan,
-        peak_amplitude=np.nan, peak_duration=np.nan,
-        breakdown_rate=np.nan, recovery_time=np.nan,
-        mean_synchrony=np.nan, synchrony_entropy=np.nan,
-    )
+    if len(profiles) == 0:
+        return DynamicFeatures(
+            onset_latency=np.nan, onset_amplitude=np.nan,
+            build_up_rate=np.nan, build_up_slope=np.nan,
+            peak_amplitude=np.nan, peak_duration=np.nan,
+            breakdown_rate=np.nan, recovery_time=np.nan,
+            mean_synchrony=np.nan, synchrony_entropy=np.nan,
+        )
 
-    # Hard NaN-ratio guard: structural missingness → reject the whole window
-    valid = ~np.isnan(wcc)
-    nan_ratio = 1.0 - valid.mean()
-    if nan_ratio > max_nan_ratio or valid.sum() < 5:
-        return _nan_features
-
-    # Work on a copy where NaN positions stay NaN (never zero-fill here).
-    # Zero-filling corrupts onset detection (wcc==0 is "below threshold" but
-    # not missing) and distorts linear slope fits for build-up / breakdown.
-    wcc_valid_only = wcc.copy()  # NaN positions remain NaN
+    # Use wcc_valid (consistent naming)
+    wcc_valid = wcc.copy()
     dt = 1.0 / hz
 
-    # --- Onset ---
-    # Use only valid (non-NaN) positions for threshold detection.
-    onset_indices = np.where(valid & (wcc_valid_only >= onset_threshold))[0]
-    if len(onset_indices) > 0:
-        onset_idx = int(onset_indices[0])
-        onset_latency = onset_idx * dt
-        onset_amplitude = float(wcc_valid_only[onset_idx])
-    else:
-        onset_idx = 0
-        onset_latency = np.nan
-        onset_amplitude = np.nan
+    # Helper: aggregation function
+    def _agg(values: List[float]) -> float:
+        """Apply aggregation function to a list of values."""
+        if len(values) == 0:
+            return np.nan
+        if aggregation == "mean":
+            return float(np.mean(values))
+        elif aggregation == "max":
+            # For "max": pick the peak with highest peak_value
+            best_idx = int(np.argmax([p["peak_value"] for p in profiles]))
+            return values[best_idx] if len(values) > best_idx else np.nan
+        elif aggregation == "median":
+            return float(np.median(values))
+        else:
+            return float(np.mean(values))
 
-    # --- Peak ---
-    # Use -inf to fill NaN positions so they can NEVER be selected as peak.
-    # This prevents zero-padded NaN slots from creating false peaks when
-    # all valid WCC values are negative.
-    wcc_for_peak = wcc_valid_only.copy()
-    wcc_for_peak[~valid] = -np.inf
-    peak_idx = int(np.argmax(wcc_for_peak))
-    peak_amplitude = float(wcc_for_peak[peak_idx])
-    peak_time = peak_idx * dt
+    # --- Per-peak feature extraction ---
+    all_build_up = [p["build_up_rate"] for p in profiles]
+    all_breakdown = [p["breakdown_rate"] for p in profiles]
+    all_peak_values = [p["peak_value"] for p in profiles]
+    all_widths = [p["width_samples"] / hz for p in profiles]
+
+    # --- Onset (first threshold crossing) ---
+    # Correct definition: first time WCC >= onset_threshold
+    onset_idx_arr = np.where(wcc_valid >= onset_threshold)[0]
+    if len(onset_idx_arr) > 0:
+        onset_idx = int(onset_idx_arr[0])
+        onset_latency = float(onset_idx) / hz
+        onset_amplitude = float(wcc_valid[onset_idx])
+    else:
+        # No onset detected: fallback to first peak
+        first_peak = profiles[0]
+        onset_latency = float(first_peak["peak_time_sec"])
+        first_idx = int(first_peak["peak_index"])
+        pre = wcc_valid[:first_idx] if first_idx > 0 else wcc_valid[:1]
+        pre_v = pre[~np.isnan(pre)]
+        onset_amplitude = float(pre_v[0]) if len(pre_v) > 0 else np.nan
 
     # --- Build-up ---
-    if onset_idx < peak_idx and not np.isnan(onset_latency):
-        build_up_duration = (peak_idx - onset_idx) * dt
-        build_up_rate = (peak_amplitude - onset_amplitude) / build_up_duration if build_up_duration > 0 else 0.0
-        # Linear slope during build-up window — skip NaN positions
-        if peak_idx - onset_idx > 1:
-            build_up_segment = wcc_valid_only[onset_idx:peak_idx + 1]
-            bu_valid = ~np.isnan(build_up_segment)
-            if bu_valid.sum() > 1:
-                t_segment = np.arange(len(build_up_segment))[bu_valid] * dt
-                slope, _ = np.polyfit(t_segment, build_up_segment[bu_valid], 1)
-                build_up_slope = float(slope)
-            else:
-                build_up_slope = 0.0
+    if aggregation == "max":
+        best_idx = int(np.argmax(all_peak_values))
+        build_up_rate = float(all_build_up[best_idx])
+    else:
+        build_up_rate = _agg(all_build_up)
+
+    # build_up_slope: linear fit from onset to first peak
+    first_idx = int(profiles[0]["peak_index"])
+    onset_idx = int(onset_idx_arr[0]) if len(onset_idx_arr) > 0 else 0
+    if first_idx > onset_idx and (first_idx - onset_idx) > 1:
+        segment = wcc_valid[onset_idx:first_idx + 1]
+        seg_valid = ~np.isnan(segment)
+        if seg_valid.sum() > 1:
+            t_seg = np.arange(len(segment))[seg_valid] * dt
+            coeffs = np.polyfit(t_seg, segment[seg_valid], 1)
+            build_up_slope = float(coeffs[0])
         else:
             build_up_slope = 0.0
     else:
-        build_up_rate = 0.0
         build_up_slope = 0.0
 
-    # --- Peak duration (time above 75% of peak) ---
-    if peak_amplitude > 0:
-        threshold_75 = 0.75 * peak_amplitude
-        # Only count valid (non-NaN) positions above threshold
-        above_75 = valid & (wcc_valid_only >= threshold_75)
-        peak_duration = float(np.sum(above_75) * dt)
+    # --- Peak ---
+    if aggregation == "max":
+        best_idx = int(np.argmax(all_peak_values))
+        peak_amplitude = float(all_peak_values[best_idx])
+        peak_duration = float(all_widths[best_idx])
     else:
-        peak_duration = 0.0
+        peak_amplitude = float(np.max(all_peak_values))  # always report strongest peak
+        peak_duration = _agg(all_widths)
 
     # --- Breakdown ---
-    if peak_idx < len(wcc_valid_only) - 1:
-        post_peak = wcc_valid_only[peak_idx:]
-        post_valid = ~np.isnan(post_peak)
-        # Rate of decrease: linear slope after peak (valid points only)
-        if post_valid.sum() > 1:
-            t_post = np.arange(len(post_peak))[post_valid] * dt
-            slope, _ = np.polyfit(t_post, post_peak[post_valid], 1)
-            breakdown_rate = -float(slope)  # positive = decreasing
-        else:
-            breakdown_rate = 0.0
-
-        # Recovery time: time from peak to WCC dropping below onset level
-        if not np.isnan(onset_amplitude):
-            recovery_mask = post_valid & (post_peak < onset_amplitude)
-            if recovery_mask.any():
-                recovery_samples = np.argmax(recovery_mask)
-                recovery_time = recovery_samples * dt
-            else:
-                recovery_time = float((len(wcc_valid_only) - 1 - peak_idx) * dt)
-        else:
-            recovery_time = np.nan
+    if aggregation == "max":
+        best_idx = int(np.argmax(all_peak_values))
+        breakdown_rate = float(all_breakdown[best_idx])
     else:
-        breakdown_rate = 0.0
-        recovery_time = np.nan
+        breakdown_rate = _agg(all_breakdown)
 
-    # --- Global features (only over valid samples) ---
-    wcc_valid_vals = wcc_valid_only[valid]
-    mean_synchrony = float(np.mean(wcc_valid_vals))
+    # --- Recovery time ---
+    # For multi-peak: use last peak's inter_peak_interval (time to next event)
+    # For single peak: use inter_peak_interval if available, else estimate
+    last_peak = profiles[-1]
+    recovery_time = float(last_peak.get("inter_peak_interval_sec", np.nan))
+    if np.isnan(recovery_time) and len(wcc_valid) > last_peak["peak_index"]:
+        # Estimate: time from last peak to end of valid WCC
+        post_peak = wcc_valid[last_peak["peak_index"]:]
+        post_valid = ~np.isnan(post_peak)
+        if post_valid.sum() > 0:
+            recovery_time = float(np.sum(post_valid)) * dt
 
-    # Shannon entropy of binned WCC distribution
-    if len(wcc_valid_vals) > 1 and np.std(wcc_valid_vals) > 0:
-        hist, _ = np.histogram(wcc_valid_vals, bins=10, density=True)
-        hist = hist[hist > 0]  # remove zero bins
-        hist = hist / hist.sum()  # normalize
+    # --- Global features ---
+    valid_vals = wcc_valid[~np.isnan(wcc_valid)]
+    mean_synchrony = float(np.mean(valid_vals)) if len(valid_vals) > 0 else np.nan
+
+    if len(valid_vals) > 1 and np.std(valid_vals) > 0:
+        hist, _ = np.histogram(valid_vals, bins=10, density=True)
+        hist = hist[hist > 0]
+        hist = hist / hist.sum()
         synchrony_entropy = float(sp_entropy(hist))
     else:
         synchrony_entropy = 0.0
@@ -408,6 +464,111 @@ def extract_dynamic_features(
         mean_synchrony=mean_synchrony,
         synchrony_entropy=synchrony_entropy,
     )
+
+
+def extract_dynamic_features(
+    wcc: np.ndarray,
+    hz: float = 1.0,
+    onset_threshold: float = 0.2,
+    max_nan_ratio: float = 0.2,
+    # Unified API parameters (v2.7 — single API, no legacy branch)
+    height: Optional[float] = None,
+    distance: Optional[int] = None,
+    prominence: Optional[float] = None,
+    aggregation: str = "mean",  # "mean" | "max" | "median"
+    return_raw_profiles: bool = False,
+) -> Tuple[DynamicFeatures, Optional[List[Dict[str, Any]]]]:
+    """
+    Extract 10 dynamic features from a WCC time series.
+
+    **Unified API (v2.7)**: This function now handles both single-peak and
+    multi-peak scenarios via ``scipy.signal.find_peaks``.  No separate
+    ``extract_peak_profiles`` call is needed.
+
+    Design decisions
+    ----------------
+    - **All peaks detected via** ``find_peaks`` (not ``np.argmax``),
+      eliminating the single-peak fallacy.
+    - **Fixed-length output**: when multiple peaks are detected, their
+      per-peak metrics are aggregated (``aggregation`` parameter) into a
+      single 10-dim vector — guaranteeing shape for downstream ML models.
+    - **Raw profiles on demand**: set ``return_raw_profiles=True`` to
+      also get the variable-length peak list for exploratory analysis.
+
+    Parameters
+    ----------
+    wcc : 1-D array
+        Windowed cross-correlation time series.
+    hz : float
+        Sampling rate of WCC (Hz).
+    onset_threshold : float
+        Minimum WCC value to count as "significant synchrony onset".
+    max_nan_ratio : float
+        Maximum fraction of NaN values permitted.
+    height : float or None
+        Minimum peak height passed to ``find_peaks``.
+        Default: ``onset_threshold``.
+    distance : int or None
+        Minimum distance (samples) between peaks.
+        Default: ``max(10, int(hz))``.
+    prominence : float or None
+        Minimum prominence of peaks.
+        Default: ``height /2``.
+    aggregation : str
+        How to aggregate per-peak features when multiple peaks are detected.
+        ``"mean"``: average; ``"max"``: use strongest peak; ``"median"``: median.
+    return_raw_profiles : bool
+        If True, return ``(DynamicFeatures, profiles)`` where ``profiles``
+        is the raw list of per-peak dicts (variable-length).
+
+    Returns
+    -------
+    DynamicFeatures, or (DynamicFeatures, List[Dict]) if return_raw_profiles=True.
+
+    Examples
+    --------
+    >>> feat = extract_dynamic_features(wcc, hz=10)
+    >>> feat, profiles = extract_dynamic_features(wcc, return_raw_profiles=True)
+    """
+    _nan_features = DynamicFeatures(
+        onset_latency=np.nan, onset_amplitude=np.nan,
+        build_up_rate=np.nan, build_up_slope=np.nan,
+        peak_amplitude=np.nan, peak_duration=np.nan,
+        breakdown_rate=np.nan, recovery_time=np.nan,
+        mean_synchrony=np.nan, synchrony_entropy=np.nan,
+    )
+
+    # Hard NaN-ratio guard
+    valid = ~np.isnan(wcc)
+    nan_ratio = 1.0 - valid.mean()
+    if nan_ratio > max_nan_ratio or valid.sum() < 5:
+        if return_raw_profiles:
+            return _nan_features, []
+        return _nan_features
+
+    # --- Unified find_peaks path (v2.7: single API, no legacy branch) ---
+    # The "single-peak fallacy" is eliminated by always using find_peaks.
+    # Multi-peak profiles are aggregated into a fixed 10-dim vector via
+    # the ``aggregation`` parameter — guaranteeing shape for downstream ML.
+    h = height if height is not None else onset_threshold
+    dist = distance if distance is not None else max(10, int(hz))
+    prom = prominence if prominence is not None else h / 2.0
+
+    profiles = _extract_peak_profiles(
+        wcc, hz=hz, height=h, distance=dist, prominence=prom
+    )
+
+    if len(profiles) == 0:
+        if return_raw_profiles:
+            return _nan_features, []
+        return _nan_features
+
+    # Aggregate multi-peak profiles into fixed 10-dim vector
+    features = _aggregate_profiles(profiles, wcc, hz, onset_threshold, aggregation)
+
+    if return_raw_profiles:
+        return features, profiles
+    return features
 
 
 def extract_features_all_pairs(
@@ -572,7 +733,7 @@ def extract_features_segmented(
 # Multi-peak profile extraction (for long-term baseline analysis)
 # ---------------------------------------------------------------------------
 
-def extract_peak_profiles(
+def _extract_peak_profiles(
     wcc: np.ndarray,
     hz: float = 1.0,
     height: float = 0.2,
@@ -641,6 +802,7 @@ def extract_peak_profiles(
         height=height,
         distance=distance,
         prominence=prominence,
+        width=1,  # Enable width calculation (min width = 1 sample)
     )
 
     if len(peaks) == 0:

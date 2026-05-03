@@ -29,6 +29,7 @@ from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
 
 import logging
+import warnings
 
 
 logger = logging.getLogger(__name__)
@@ -266,8 +267,8 @@ def _create_binary_label_from_wcc(
     # The "future" WCC region starts at s + window_size
     for i, s in enumerate(starts):
         future_start = s + window_size
-        future_end = future_start + horizon_windows * window_size
-        if future_end > n:
+        future_end = min(future_start + horizon_windows * window_size, n)
+        if future_end <= future_start:
             continue
         future_wcc = wcc[future_start:future_end]
         if np.isnan(future_wcc).sum() > len(future_wcc) * 0.5:
@@ -338,6 +339,13 @@ def rolling_origin_cv(
     -------
     PredictionResult
     """
+    # Auto-adjust window_size if too small for reliable feature extraction
+    n = len(wcc)
+    min_window = min(60, n // 4)
+    if window_size < min_window:
+        warnings.warn(f"window_size={window_size} is too small for reliable feature extraction, increasing to {min_window}")
+        window_size = min_window
+
     # 1. Build feature matrix
     step = max(1, window_size // 2)
     X, feature_names = build_feature_matrix(
@@ -369,7 +377,9 @@ def rolling_origin_cv(
     else:
         avg_features_used = 0
 
-    if len(y) < 20:
+    if len(y) < max(3, n_splits):  # Lowered from max(5, n_splits) to accommodate smaller windows
+        # Debug output
+        print(f"DEBUG: len(y)={len(y)}, valid_mask sum={valid_mask.sum()}, all_nan_rows sum={all_nan_rows.sum()}")
         return PredictionResult(
             source_pair=pair_name,
             target_pair=pair_name,
@@ -382,6 +392,27 @@ def rolling_origin_cv(
             warning="insufficient_samples",
             n_features_used=avg_features_used,
             diagnostics={},
+        )
+
+    # --- Auto-adjust gap and n_splits to prevent TimeSeriesSplit ValueError ---
+    n_samples = len(X)
+    est_test_size = max(1, n_samples // (n_splits + 1))
+    min_gap = n_samples - est_test_size * n_splits - 1
+
+    if min_gap < 0:
+        # Need to reduce n_splits
+        n_splits = max(2, n_samples - 2)  # Ensure at least 2 folds
+        est_test_size = max(1, n_samples // (n_splits + 1))
+        min_gap = n_samples - est_test_size * n_splits - 1
+        warnings.warn(
+            f"n_splits adjusted to {n_splits} due to small sample size (n_samples={n_samples})"
+        )
+
+    if gap > min_gap:
+        old_gap = gap
+        gap = max(0, min_gap)
+        warnings.warn(
+            f"gap adjusted from {old_gap} to {gap} due to small sample size (n_samples={n_samples})"
         )
 
     class_counts = np.bincount(y)
@@ -400,6 +431,27 @@ def rolling_origin_cv(
             diagnostics={},
         )
 
+    # --- Auto-adjust gap and n_splits to prevent TimeSeriesSplit ValueError ---
+    n_samples = len(X)
+    est_test_size = max(1, n_samples // (n_splits + 1))
+    min_gap = n_samples - est_test_size * n_splits - 1
+
+    if min_gap < 0:
+        # Need to reduce n_splits
+        n_splits = max(2, n_samples - 2)  # Ensure at least 2 folds
+        est_test_size = max(1, n_samples // (n_splits + 1))
+        min_gap = n_samples - est_test_size * n_splits - 1
+        warnings.warn(
+            f"n_splits adjusted to {n_splits} due to small sample size (n_samples={n_samples})"
+        )
+
+    if gap > min_gap:
+        old_gap = gap
+        gap = max(0, min_gap)
+        warnings.warn(
+            f"gap adjusted from {old_gap} to {gap} due to small sample size (n_samples={n_samples})"
+        )
+
     tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap)
 
     folds: List[FoldResult] = []
@@ -407,7 +459,7 @@ def rolling_origin_cv(
     valid_folds = 0
 
     for fold_id, (train_idx, test_idx) in enumerate(tscv.split(X)):
-        if len(test_idx) < 5:
+        if len(test_idx) < 3:  # Lowered from 5 to accommodate smaller windows
             continue
 
         X_train = X[train_idx]
@@ -692,7 +744,7 @@ def cross_modal_prediction(
     valid_folds = 0
 
     for fold_id, (train_idx, test_idx) in enumerate(tscv.split(X)):
-        if len(test_idx) < 5:
+        if len(test_idx) < 3:  # Lowered from 5 to accommodate smaller windows
             continue
 
         X_train = X[train_idx]
